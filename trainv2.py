@@ -11,7 +11,7 @@ import time
 from timm.utils import NativeScaler
 import random
 import numpy as np
-from src.model import mymodelycbcr,net
+from src.net import net
 import os
 from fvcore.nn import FlopCountAnalysis
 
@@ -26,13 +26,15 @@ BATCH=8
 img_size=256
 
 
-model_dir='/home/huangweiyan/workspace/model/cv/checkpoint'
+model_dir='/home/huangweiyan/workspace/model/cv/checkpointv2'
 model_restored=net()
 model_restored.cuda()
 
 checkpoint=torch.load(os.path.join(model_dir,'model_bestPSNR.pth'))
 model_restored.load_state_dict(checkpoint['state_dict'],strict=False)
-
+for name, param in model_restored.named_parameters():
+    if name in checkpoint['state_dict']:
+        param.requires_grad = False
 
 with torch.no_grad():
     model_restored.eval()
@@ -40,7 +42,7 @@ with torch.no_grad():
     flops=FlopCountAnalysis(model_restored,input)
 
 loss_scaler = NativeScaler()
-log_dir = os.path.join('/home/huangweiyan/workspace/model/cv/log', time.strftime('%m%d_%H%M'))
+log_dir = os.path.join('/home/huangweiyan/workspace/model/cv/logv2', time.strftime('%m%d_%H%M'))
 writer = SummaryWriter(log_dir)
 scaler = amp.GradScaler()
 

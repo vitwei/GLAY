@@ -81,6 +81,24 @@ class EdgeLoss(nn.Module):
         loss = mse_loss(self.laplacian_kernel(x), self.laplacian_kernel(y))
         return loss*self.weight
     
+class TVLoss(nn.Module):
+    def __init__(self, TVLoss_weight=1):
+        super(TVLoss, self).__init__()
+        self.TVLoss_weight = TVLoss_weight
+
+    def forward(self, x):
+        batch_size = x.size()[0]
+        h_x = x.size()[2]
+        w_x = x.size()[3]
+        count_h = self._tensor_size(x[:, :, 1:, :])
+        count_w = self._tensor_size(x[:, :, :, 1:])
+        h_tv = torch.pow((x[:, :, 1:, :] - x[:, :, :h_x - 1, :]), 2).sum()
+        w_tv = torch.pow((x[:, :, :, 1:] - x[:, :, :, :w_x - 1]), 2).sum()
+        return self.TVLoss_weight * 2 * (h_tv / count_h + w_tv / count_w) / batch_size
+
+    def _tensor_size(self, t):
+        return t.size()[1] * t.size()[2] * t.size()[3]
+
 class CombinedLoss(nn.Module):
     def __init__(self, device):
         super(CombinedLoss, self).__init__()
@@ -92,6 +110,7 @@ class CombinedLoss(nn.Module):
         self.alpha5 = 0.0083
         self.alpha6 = 0.25
         self.EdgeLoss= EdgeLoss()
+        self.tvloss=TVLoss()
     def forward(self, y_true, y_pred):
         smooth_l1_l = smooth_l1_loss(y_true, y_pred)
         ms_ssim_l = multiscale_ssim_loss(y_true, y_pred)
@@ -100,9 +119,9 @@ class CombinedLoss(nn.Module):
         psnr_l = psnr_loss(y_true, y_pred)
         color_l = color_loss(y_true, y_pred)
         Edge_l= self.EdgeLoss(y_true, y_pred)
-
+        Tv_l=self.tvloss(y_pred)
         total_loss = (self.alpha1 * smooth_l1_l + self.alpha2 * perc_l + 
                       self.alpha3 * hist_l + self.alpha5 * psnr_l + 
-                      self.alpha6 * color_l + self.alpha4 * ms_ssim_l+Edge_l)
+                      self.alpha6 * color_l + self.alpha4 * ms_ssim_l+Edge_l+Tv_l)
 
         return torch.mean(total_loss)

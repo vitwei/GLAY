@@ -4346,7 +4346,7 @@ class DenoisingCNN(nn.Module):
             nn.LeakyReLU(inplace=False)
         )
         self.se_block = se_block(channels=channles)
-        self.out_conv = DepthwiseSeparableConv2d(4, 2, 1, 1, 0)
+        self.out_conv = DepthwiseSeparableConv2d(4, 3, 1, 1, 0)
 
     def forward(self, x):
         x_bright, _ = torch.max(x, dim=1, keepdim=True)  # CPU
@@ -4531,7 +4531,15 @@ class mymodelycbcr(nn.Module):
 
         #recombinedycbcr=torch.cat([self.vv(i_dec1),self.cc(hv_1)],dim=1)+ycbcr
         fuse=self.fuse(torch.cat([i_dec1,hv_1], dim=1))
-        return self.c(self.v(fuse))+input
+        return self.c(self.v(fuse))
 
+class net(nn.Module):
+    def __init__(self, filters=32):
+        super().__init__()
+        self.Unet=mymodelycbcr()
 
+    def forward(self, inputs):
+        out_unet  = self.Unet(inputs)
+        final = out_unet + inputs
+        return final
 ##########################################################################
