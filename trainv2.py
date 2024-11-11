@@ -25,12 +25,12 @@ torch.backends.cudnn.benchmark = True
 BATCH=8
 img_size=256
 
-
+premodel_dir='/home/huangweiyan/workspace/model/cv/checkpoint'
 model_dir='/home/huangweiyan/workspace/model/cv/checkpointv2'
 model_restored=net()
 model_restored.cuda()
 
-checkpoint=torch.load(os.path.join(model_dir,'model_bestPSNR.pth'))
+checkpoint=torch.load(os.path.join(premodel_dir,'model_bestPSNR.pth'))
 model_restored.load_state_dict(checkpoint['state_dict'],strict=False)
 for name, param in model_restored.named_parameters():
     if name in checkpoint['state_dict']:
