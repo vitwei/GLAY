@@ -91,7 +91,7 @@ class CombinedLoss(nn.Module):
         self.alpha4 = 0.5
         self.alpha5 = 0.0083
         self.alpha6 = 0.25
-
+        self.EdgeLoss= EdgeLoss()
     def forward(self, y_true, y_pred):
         smooth_l1_l = smooth_l1_loss(y_true, y_pred)
         ms_ssim_l = multiscale_ssim_loss(y_true, y_pred)
@@ -99,7 +99,7 @@ class CombinedLoss(nn.Module):
         hist_l = histogram_loss(y_true, y_pred)
         psnr_l = psnr_loss(y_true, y_pred)
         color_l = color_loss(y_true, y_pred)
-        Edge_l= EdgeLoss(y_true, y_pred)
+        Edge_l= self.EdgeLoss(y_true, y_pred)
 
         total_loss = (self.alpha1 * smooth_l1_l + self.alpha2 * perc_l + 
                       self.alpha3 * hist_l + self.alpha5 * psnr_l + 

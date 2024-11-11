@@ -4417,21 +4417,21 @@ class mymodelycbcr(nn.Module):
             nn.Conv2d(1, ch1, 3, stride=1, padding=1,bias=False),
             myencoderBlock(filters),
             myencoderBlock(filters),
-            mydoubleconv(filters),
+            mydoubleconv(filters)
         )    
 
         self.estimator = Illumination_Estimator(filters)
-        self.HVE_block1 = NormDownsample(ch1,ch1, ch2, use_norm = norm)
-        self.HVE_block2 = NormDownsample(ch2,ch1, ch3, use_norm = norm)
-        self.HVE_block3 = NormDownsample(ch3,ch1, ch4, use_norm = norm)
+        self.HVE_block1 = NormDownsample(ch1, ch2, use_norm = norm)
+        self.HVE_block2 = NormDownsample(ch2, ch3, use_norm = norm)
+        self.HVE_block3 = NormDownsample(ch3, ch4, use_norm = norm)
         
         self.HVD_block3 = NormUpsample(ch4, ch3, use_norm = norm)
         self.HVD_block2 = NormUpsample(ch3, ch2, use_norm = norm)
         self.HVD_block1 = NormUpsample(ch2, ch1, use_norm = norm)
 
-        self.IE_block1 = NormDownsample(ch1,ch1, ch2, use_norm = norm)
-        self.IE_block2 = NormDownsample(ch2,ch1, ch3, use_norm = norm)
-        self.IE_block3 = NormDownsample(ch3,ch1, ch4, use_norm = norm)
+        self.IE_block1 = NormDownsample(ch1, ch2, use_norm = norm)
+        self.IE_block2 = NormDownsample(ch2, ch3, use_norm = norm)
+        self.IE_block3 = NormDownsample(ch3, ch4, use_norm = norm)
         
         self.ID_block3 = NormUpsample(ch4, ch3, use_norm=norm)
         self.ID_block2 = NormUpsample(ch3, ch2, use_norm=norm)
@@ -4454,8 +4454,17 @@ class mymodelycbcr(nn.Module):
         self.fuse=DetailFeatureExtractor(num_layers=1,dim=filters)
         self.v = nn.Conv2d(filters*2,filters,3,1,1)
         self.c = nn.Conv2d(filters,1,3,1,1)
-        self.cc=DenoisingCNN(64)
         self.apply(self._init_weights)
+
+    def _rgb_to_ycbcr(self, image):
+        r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
+    
+        y = 0.299 * r + 0.587 * g + 0.114 * b
+        u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
+        v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
+        
+        yuv = torch.stack((y, u, v), dim=1)
+        return yuv
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -4467,11 +4476,11 @@ class mymodelycbcr(nn.Module):
 
 
     def forward(self, input):
-        illu_fea, illu_map = self.estimator(input)
+        _, illu_map = self.estimator(input)
         input_img = input * illu_map +input
 
-        ycbcr=self._rgb_to_ycbcr(input)
-        y,_,_=ycbcr.chunk(3,dim=1)
+        ycbcr=self._rgb_to_ycbcr(input_img)
+        y, _, _ = torch.split(ycbcr, 1, dim=1)
         lum=self.LightEncoder(y)
         fea=self.colorEncoder(ycbcr)
 
@@ -4523,92 +4532,6 @@ class mymodelycbcr(nn.Module):
         #recombinedycbcr=torch.cat([self.vv(i_dec1),self.cc(hv_1)],dim=1)+ycbcr
         fuse=self.fuse(torch.cat([i_dec1,hv_1], dim=1))
         return self.c(self.v(fuse))+input
-    
-class mymodel(nn.Module):
-    def __init__(self, filters=32,
-                 channels=[32, 32, 64, 128],
-                 heads=[1, 4, 8, 16],
-                 norm=False
-        ):
-        super().__init__()
-        [ch1, ch2, ch3, ch4] = channels
-        [head1, head2, head3, head4] = heads
-        self.Y_estimator = YNet(filters)
-        self.Colordenoise = DenoisingCNN(64)
-        self._ycbcr_to_rgb=YUV2RGB()
-        self._rgb_to_ycbcr=self.GT_rgb_to_ycbcr
-        self.apply(self._init_weights)
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
 
 
-    def GT_rgb_to_ycbcr(self, image):
-        r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
-    
-        y = 0.299 * r + 0.587 * g + 0.114 * b
-        u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
-        v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
-        
-        yuv = torch.stack((y, u, v), dim=1)
-        return yuv
-    def forward(self, input):
-        ycbcr=self._rgb_to_ycbcr(input)
-        colorout = self.Colordenoise(ycbcr)
-        yout = self.Y_estimator(ycbcr)
-        final = torch.cat([yout,colorout],dim=1)
-        return self._ycbcr_to_rgb(final)
-
-
-class YNet(nn.Module):
-    def __init__(self, filters=32):
-        super(YNet, self).__init__()
-        self.process_y = nn.Sequential(
-            nn.Conv2d(1, filters, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
-        )
-        self.process_cb = nn.Sequential(
-            nn.Conv2d(1, filters, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
-        )
-        self.process_cr = nn.Sequential(
-            nn.Conv2d(1, filters, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
-        )
-
-        self.denoiser_cb = Denoiser(filters // 2)
-        self.denoiser_cr = Denoiser(filters // 2)
-        self.lum_pool = nn.MaxPool2d(8)
-        self.lum_mhsa = MultiHeadSelfAttention(embed_size=filters, num_heads=4)
-        self.lum_up = nn.Upsample(scale_factor=8, mode='nearest')
-        self.lum_conv = nn.Conv2d(filters, filters, kernel_size=1, padding=0)
-        self.ref_conv = nn.Conv2d(filters * 2, filters, kernel_size=1, padding=0)
-        self.msef = MSEFBlock(filters)
-        self.recombine = nn.Conv2d(filters, filters, kernel_size=5, padding=2)
-        self.final_adjustments = nn.Conv2d(filters, 1, kernel_size=5, padding=2)
-        self._init_weights()
-
-    def _init_weights(self):
-        for module in self.children():
-            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-                init.kaiming_uniform_(module.weight, a=0, mode='fan_in', nonlinearity='relu')
-                if module.bias is not None:
-                    init.constant_(module.bias, 0)
-
-    def forward(self, inputs):
-        y, _, _ = torch.split(inputs, 1, dim=1)
-        y_processed = self.process_y(y)
-        lum = y_processed
-        lum_1 = self.lum_pool(lum)
-        lum_1 = self.lum_mhsa(lum_1)
-        lum_1 = self.lum_up(lum_1)
-        lum = lum + lum_1
-        recombined = self.recombine(lum)
-        output = self.final_adjustments(recombined)
-        return torch.sigmoid(output)
 ##########################################################################

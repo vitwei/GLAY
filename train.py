@@ -11,7 +11,7 @@ import time
 from timm.utils import NativeScaler
 import random
 import numpy as np
-from src.model import mymodel
+from src.model import mymodelycbcr
 import os
 from fvcore.nn import FlopCountAnalysis
 
@@ -20,31 +20,32 @@ np.random.seed(1234)
 torch.manual_seed(1234)
 torch.cuda.manual_seed_all(1234)
 
-BATCH=4
+BATCH=8
 img_size=256
 
 
 model_dir='/home/huangweiyan/workspace/model/cv/checkpoint'
-model_restored=mymodel()
+model_restored=mymodelycbcr()
 model_restored.cuda()
 
 with torch.no_grad():
-    input=torch.rand(1,3,256,256).cuda()
+    model_restored.eval()
+    input=(torch.rand(1,3,256,256).cuda(),)
     flops=FlopCountAnalysis(model_restored,input)
-    
+
 loss_scaler = NativeScaler()
 log_dir = os.path.join('/home/huangweiyan/workspace/model/cv/log', time.strftime('%Y%m%d_%H%M'))
 writer = SummaryWriter(log_dir)
 scaler = amp.GradScaler()
 
 
-train_loader,test_loader=create_dataloaders(train='/mnt/vos-mybvvteu/Davidhwang/mymodel/cv/data/LOLv1/Train',
-                                    test='/mnt/vos-mybvvteu/Davidhwang/mymodel/cv/data/LOLv1/Test',
+train_loader,test_loader=create_dataloaders(train='/home/huangweiyan/workspace/model/cv/data/LOLv1/Train',
+                                    test='/home/huangweiyan/workspace/model/cv/data/LOLv1/Test',
                                     crop_size=img_size,augimg=True,batch_size=BATCH)
 
 Charloss = CombinedLoss('cuda')
 EPOCHS=2000
-TEST_AFTER=5
+TEST_AFTER=4
 p_number = network_parameters(model_restored)
 
 best_psnr = 0
@@ -69,7 +70,7 @@ print(f'''==> Training details:
     Start/End epochs:   {str(1) + '~' + str(EPOCHS)}
     Batch sizes:        {BATCH}
     Learning rate:      {LR_INITIAL}
-    Flops:      {flops.total()/1024*1024*1024}
+    Flops:              {flops.total()/(1024*1024*1024)}
     
 ''')
 print('------------------------------------------------------------------')
@@ -88,11 +89,10 @@ for epoch in range(1,EPOCHS+1):
         optimizer.zero_grad()
         target = data[0].cuda()
         input = data[1].cuda()
-        with torch.cuda.amp.autocast():
-            restored = model_restored(input)
-            loss = Charloss(restored, target)
-        loss_scaler(
-                loss, optimizer,parameters=model_restored.parameters())
+        restored = model_restored(input)
+        loss = Charloss(restored, target)
+        loss.backward()
+        optimizer.step()
         epoch_loss +=loss.item()
 
     writer.add_scalar('train/loss', epoch_loss, epoch)
