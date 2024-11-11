@@ -1,6 +1,6 @@
-checkpoint
-checkpointv2
-log
-data
+checkpoint/
+checkpointv2/
+log/
+data/
 src/vmamba
 *.pyc
