@@ -38,7 +38,7 @@ with torch.no_grad():
     flops=FlopCountAnalysis(model_restored,input)
 
 loss_scaler = NativeScaler()
-log_dir = os.path.join('/home/huangweiyan/workspace/model/cv/log', time.strftime('%Y%m%d_%H%M'))
+log_dir = os.path.join('/home/huangweiyan/workspace/model/cv/log', time.strftime('%m%d_%H%M'))
 writer = SummaryWriter(log_dir)
 scaler = amp.GradScaler()
 
