@@ -28,6 +28,10 @@ model_dir='/home/huangweiyan/workspace/model/cv/checkpoint'
 model_restored=mymodelycbcr()
 model_restored.cuda()
 
+checkpoint=torch.load(os.path.join(model_dir,'model_bestPSNR.pth'))
+model_restored.load_state_dict(checkpoint['state_dict'])
+
+
 with torch.no_grad():
     model_restored.eval()
     input=(torch.rand(1,3,256,256).cuda(),)
@@ -137,10 +141,6 @@ for epoch in range(1,EPOCHS+1):
             print("[epoch %d SSIM: %.4f --- best_epoch %d Best_SSIM %.4f]" % (
                 epoch, ssim_val_rgb, best_epoch_ssim, best_ssim))    
 
-            torch.save({'epoch': epoch, 
-                        'state_dict': model_restored.state_dict(),
-                        'optimizer' : optimizer.state_dict()
-                        }, os.path.join(model_dir,"model_epoch_{}.pth".format(epoch))) 
             writer.add_scalar('val/PSNR', psnr_val_rgb, epoch)
             writer.add_scalar('val/SSIM', ssim_val_rgb, epoch)
             writer.add_scalar('val/loss', test_loss, epoch)
