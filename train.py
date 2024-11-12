@@ -15,10 +15,10 @@ from src.model import mymodelycbcr,net
 import os
 from fvcore.nn import FlopCountAnalysis
 
-random.seed(1234)
-np.random.seed(1234)
-torch.manual_seed(1234)
-torch.cuda.manual_seed_all(1234)
+random.seed(3407)
+np.random.seed(3407)
+torch.manual_seed(3407)
+torch.cuda.manual_seed_all(3407)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
@@ -54,7 +54,7 @@ EPOCHS=2000
 TEST_AFTER=4
 p_number = network_parameters(model_restored)
 
-best_psnr = 0
+best_psnr = 22.34
 best_ssim = 0
 best_epoch_psnr = 0
 best_epoch_ssim = 0
@@ -96,7 +96,7 @@ for epoch in range(1,EPOCHS+1):
         target = data[0].cuda()
         input = data[1].cuda()
         restored = model_restored(input)
-        loss = Charloss(restored, target)
+        loss = Charloss(target, restored)
         loss.backward()
         optimizer.step()
         epoch_loss +=loss.item()
@@ -115,7 +115,7 @@ for epoch in range(1,EPOCHS+1):
                 h, w = target.shape[2], target.shape[3]
                 restored = model_restored(input)
                 restored = restored[:, :, :h, :w]
-                loss = Charloss(restored, target)
+                loss = Charloss(target,restored)
                 test_loss +=loss.item()
                 for res, tar in zip(restored, target):
                     psnr_val_rgb.append(torchPSNR(res, tar))

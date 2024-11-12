@@ -4453,7 +4453,7 @@ class mymodelycbcr(nn.Module):
         self.I_LCA6 = MyI_LCA2(ch2, head2)
         self.fuse=DetailFeatureExtractor(num_layers=1,dim=filters)
         self.v = nn.Conv2d(filters*2,filters,3,1,1)
-        self.c = nn.Conv2d(filters,1,3,1,1)
+        self.c = nn.Conv2d(filters,3,3,1,1)
         self.apply(self._init_weights)
 
     def _rgb_to_ycbcr(self, image):
@@ -4465,6 +4465,7 @@ class mymodelycbcr(nn.Module):
         
         yuv = torch.stack((y, u, v), dim=1)
         return yuv
+    
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
