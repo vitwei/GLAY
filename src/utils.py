@@ -182,7 +182,7 @@ class PairedImageDataset(Dataset):
                 clean = getattr(augment, apply_trans)(clean)
                 noisy = getattr(augment, apply_trans)(noisy)   
 
-        return clean, noisy
+        return clean, noisy,os.path.basename(low_image_path)
     
 
 def create_dataloaders(train, test, crop_size=256,augimg=True,batch_size=1):
@@ -195,7 +195,7 @@ def create_dataloaders(train, test, crop_size=256,augimg=True,batch_size=1):
 
     if test:
         test_dataset = PairedImageDataset(test,training=False)
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0)
+        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
 
     return train_loader, test_loader
 

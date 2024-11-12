@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.cuda.amp as amp
 from torch.utils.tensorboard import SummaryWriter   
 from torch.optim.lr_scheduler import CosineAnnealingLR,CosineAnnealingWarmRestarts,StepLR
-from src.utils import create_dataloaders,torchPSNR,torchSSIM,network_parameters,GradualWarmupScheduler
-from src.loss import CombinedLoss
+from src.utils import create_dataloaders,torchPSNR,torchSSIM,network_parameters,GradualWarmupScheduler,CosineAnnealingRestartLR
+from src.loss import CombinedLoss,multi_VGGPerceptualLoss
 import time
 from timm.utils import NativeScaler
 import random
@@ -22,16 +22,16 @@ torch.cuda.manual_seed_all(3407)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
-BATCH=8
-img_size=256
+BATCH=4
+img_size=400
 
 
 model_dir='/home/huangweiyan/workspace/model/cv/checkpoint'
-model_restored=net()
+model_restored=mymodelycbcr()
 model_restored.cuda()
 
-checkpoint=torch.load(os.path.join(model_dir,'model_bestPSNR.pth'))
-model_restored.load_state_dict(checkpoint['state_dict'],strict=False)
+#checkpoint=torch.load(os.path.join(model_dir,'model_bestPSNR.pth'))
+#model_restored.load_state_dict(checkpoint['state_dict'],strict=False)
 
 
 with torch.no_grad():
@@ -48,13 +48,13 @@ scaler = amp.GradScaler()
 train_loader,test_loader=create_dataloaders(train='/home/huangweiyan/workspace/model/cv/data/LOLv1/Train',
                                     test='/home/huangweiyan/workspace/model/cv/data/LOLv1/Test',
                                     crop_size=img_size,augimg=True,batch_size=BATCH)
-
-Charloss = CombinedLoss('cuda')
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+Charloss = multi_VGGPerceptualLoss().to(device)
 EPOCHS=2000
 TEST_AFTER=4
 p_number = network_parameters(model_restored)
 
-best_psnr = 22.34
+best_psnr = 0
 best_ssim = 0
 best_epoch_psnr = 0
 best_epoch_ssim = 0
@@ -63,7 +63,8 @@ total_start_time = time.time()
 LR_INITIAL=1e-4
 
 optimizer = optim.Adam(model_restored.parameters(), lr=LR_INITIAL, betas=(0.9, 0.999),eps=1e-8, weight_decay=0.02)
-scheduler_cosine = optim.lr_scheduler.CosineAnnealingLR(optimizer, EPOCHS-30, eta_min=1e-8)
+#scheduler_cosine =CosineAnnealingRestartLR(optimizer, periods=[200,1470], restart_weights=(1,0.001), eta_min=1e-6)
+scheduler_cosine = optim.lr_scheduler.CosineAnnealingLR(optimizer, EPOCHS-30, eta_min=1e-6)
 scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=30, after_scheduler=scheduler_cosine)
 scheduler.step()
 
@@ -95,8 +96,8 @@ for epoch in range(1,EPOCHS+1):
         optimizer.zero_grad()
         target = data[0].cuda()
         input = data[1].cuda()
-        restored = model_restored(input)
-        loss = Charloss(target, restored)
+        out2,out1,out0 = model_restored(input)
+        loss = Charloss(out2,out1,out0, target)
         loss.backward()
         optimizer.step()
         epoch_loss +=loss.item()
@@ -113,13 +114,14 @@ for epoch in range(1,EPOCHS+1):
                 target = test[0].cuda()
                 input = test[1].cuda()
                 h, w = target.shape[2], target.shape[3]
-                restored = model_restored(input)
-                restored = restored[:, :, :h, :w]
-                loss = Charloss(target,restored)
+                out2,out1,out0 = model_restored(input)
+                loss = Charloss(out2,out1,out0, target)
+                #restored = restored[:, :, :h, :w]
+                #loss = Charloss(target,restored)
                 test_loss +=loss.item()
-                for res, tar in zip(restored, target):
+                for res, tar in zip(out2, target):
                     psnr_val_rgb.append(torchPSNR(res, tar))
-                    ssim_val_rgb.append(torchSSIM(restored, target))
+                    ssim_val_rgb.append(torchSSIM(out2, target))
             psnr_val_rgb = torch.stack(psnr_val_rgb).mean().item()
             ssim_val_rgb = torch.stack(ssim_val_rgb).mean().item()
             if psnr_val_rgb > best_psnr:

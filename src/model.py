@@ -484,7 +484,7 @@ class MyI_LCA2(nn.Module):
         self.attn= Attention_block(dim,dim,dim)
         #self.se_block = se_block(dim=dim)
         self.conv=nn.Sequential(
-            nn.Conv2d(in_channels=dim*2, out_channels=dim, kernel_size=1, padding=0, bias=False),
+            nn.Conv2d(in_channels=dim*2, out_channels=dim, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(dim, eps=0.0001, momentum = 0.95),
             nn.PReLU(),
         )
@@ -3174,40 +3174,6 @@ class MultiHeadSelfAttention(nn.Module):
         init.constant_(self.value_dense.bias, 0)
         init.constant_(self.combine_heads.bias, 0)
 
-class Denoiser(nn.Module):
-    def __init__(self, num_filters, kernel_size=3, activation='relu'):
-        super(Denoiser, self).__init__()
-        self.conv1 = nn.Conv2d(1, num_filters, kernel_size=kernel_size, padding=1)
-        self.conv2 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
-        self.conv4 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
-        self.bottleneck = MultiHeadSelfAttention(embed_size=num_filters, num_heads=4)
-        self.up2 = nn.Upsample(scale_factor=2, mode='nearest')
-        self.up3 = nn.Upsample(scale_factor=2, mode='nearest')
-        self.up4 = nn.Upsample(scale_factor=2, mode='nearest')
-        self.output_layer = nn.Conv2d(1, 1, kernel_size=kernel_size, padding=1)
-        self.res_layer = nn.Conv2d(num_filters, 1, kernel_size=kernel_size, padding=1)
-        self.activation = getattr(F, activation)
-        self._init_weights()
-
-    def forward(self, x):
-        x1 = self.activation(self.conv1(x))
-        x2 = self.activation(self.conv2(x1))
-        x3 = self.activation(self.conv3(x2))
-        x4 = self.activation(self.conv4(x3))
-        x = self.bottleneck(x4)
-        x = self.up4(x)
-        x = self.up3(x + x3)
-        x = self.up2(x + x2)
-        x = x + x1
-        x = self.res_layer(x)
-        return torch.tanh(self.output_layer(x + x))
-    
-    def _init_weights(self):
-        for layer in [self.conv1, self.conv2, self.conv3, self.conv4, self.output_layer, self.res_layer]:
-            init.kaiming_uniform_(layer.weight, a=0, mode='fan_in', nonlinearity='relu')
-            if layer.bias is not None:
-                init.constant_(layer.bias, 0)
 
 #################BreadcrumbsOCTAMamba##########################
 class ChannelAttentionModule(nn.Module):
@@ -4376,32 +4342,12 @@ class DenoisingCNN(nn.Module):
     
 
 #########################ExpoMamba#########################
-class Upsample(nn.Sequential):
-    """Upsample module.
-
-    Args:
-        scale (int): Scale factor. Supported scales: 2^n and 3.
-        num_feat (int): Channel number of intermediate features.
-    """
-
-    def __init__(self, scale, dim):
-        m = []
-        if (scale & (scale - 1)) == 0:  # scale = 2^n
-            for _ in range(int(math.log(scale, 2))):
-                m.append(nn.Conv2d(dim, 4 * dim, 3, 1, 1))
-                m.append(nn.PixelShuffle(2))
-        elif scale == 3:
-            m.append(nn.Conv2d(dim, 9 * dim, 3, 1, 1))
-            m.append(nn.PixelShuffle(3))
-        else:
-            raise ValueError(f'scale {scale} is not supported. ' 'Supported scales: 2^n and 3.')
-        super(Upsample, self).__init__(*m)
 
 ######################
 class mymodelycbcr(nn.Module):
     def __init__(self, filters=32,
                  channels=[32, 32, 64, 128],
-                 heads=[1, 2, 4, 8],
+                 heads=[1, 4, 8, 16],
                  norm=False
         ):
         super().__init__()
@@ -4451,8 +4397,12 @@ class mymodelycbcr(nn.Module):
         self.I_LCA4 = MyI_LCA2(ch4, head4)
         self.I_LCA5 = MyI_LCA2(ch3, head3)
         self.I_LCA6 = MyI_LCA2(ch2, head2)
-        self.fuse=DetailFeatureExtractor(num_layers=1,dim=filters)
-        self.v = nn.Conv2d(filters*2,filters,3,1,1)
+        self.fuse2=DetailFeatureExtractor(num_layers=1,dim=filters)
+        self.fuse1=DetailFeatureExtractor(num_layers=1,dim=ch2)
+        self.fuse0=DetailFeatureExtractor(num_layers=1,dim=ch3)
+        self.v2 = nn.Conv2d(filters*2,filters,3,1,1)
+        self.v1 = nn.Conv2d(ch2*2,filters,3,1,1)
+        self.v0 = nn.Conv2d(ch3*2,filters,3,1,1)
         self.c = nn.Conv2d(filters,3,3,1,1)
         self.apply(self._init_weights)
 
@@ -4529,11 +4479,38 @@ class mymodelycbcr(nn.Module):
         
         i_dec1 = self.ID_block1(i_dec1, i_jump0)
         hv_1 = self.HVD_block1(hv_1, hv_jump0)
+        fuse0=self.c(self.v0(self.fuse0(torch.cat([i_dec3,hv_3], dim=1))))
+        fuse1=self.c(self.v1(self.fuse1(torch.cat([i_dec2,hv_2], dim=1))))
+        fuse2=self.c(self.v2(self.fuse2(torch.cat([i_dec1,hv_1], dim=1))))
+        return fuse2,fuse1,fuse0
 
-        #recombinedycbcr=torch.cat([self.vv(i_dec1),self.cc(hv_1)],dim=1)+ycbcr
-        fuse=self.fuse(torch.cat([i_dec1,hv_1], dim=1))
-        return self.c(self.v(fuse))
 
+class mymodel(nn.Module):
+    def __init__(self, filters=64,
+                 channels=[32, 32, 64, 128],
+                 heads=[1, 4, 8, 16],
+                 norm=False
+        ):
+        super().__init__()
+        [ch1, ch2, ch3, ch4] = channels
+        [head1, head2, head3, head4] = heads
+        self.pixeldown=nn.PixelUnshuffle(4)
+        self.pixeldownconv=nn.Conv2d(48,filters,kernel_size=3, bias=True)
+
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+
+    def forward(self, input):
+        pass
 class net(nn.Module):
     def __init__(self, filters=32):
         super().__init__()
