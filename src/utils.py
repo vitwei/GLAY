@@ -188,16 +188,18 @@ class PairedImageDataset(Dataset):
 def create_dataloaders(train, test, crop_size=256,augimg=True,batch_size=1):
     train_loader = None
     test_loader = None
+    radom_loader=None
     
     if train:
         train_dataset = PairedImageDataset(train, patchsize=crop_size,aug=augimg)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8,drop_last=True)
+        radom_loader = DataLoader(train_dataset, batch_size=1, shuffle=False, num_workers=1)
 
     if test:
         test_dataset = PairedImageDataset(test,training=False)
         test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
 
-    return train_loader, test_loader
+    return train_loader, test_loader,radom_loader
 
 
 class GradualWarmupScheduler(_LRScheduler):
@@ -292,7 +294,7 @@ def get_gaussian_kernel2d(ksize: Tuple[int, int],
     return kernel_2d
 
 
-def torchPSNR(tar_img, prd_img):
+def torchPSNR(tar_img, prd_img,gt_mean=True):
     imdff = torch.clamp(prd_img, 0, 1) - torch.clamp(tar_img, 0, 1)
     rmse = (imdff**2).mean().sqrt()
     ps = 20*torch.log10(1/rmse)

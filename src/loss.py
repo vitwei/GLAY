@@ -175,12 +175,13 @@ class multi_VGGPerceptualLoss(nn.Module):
         self.loss_fn = NewVGGPerceptualLoss()
         self.lam = lam
         self.lam_p = lam_p
+        self.tvloss=TVLoss()
     def forward(self, out1, out2, out3, gt1, feature_layers=[2]):
         gt2 = F.interpolate(gt1, scale_factor=0.5, mode='bilinear', align_corners=False)
         gt3 = F.interpolate(gt1, scale_factor=0.25, mode='bilinear', align_corners=False)
         
-        loss1 = self.lam_p*self.loss_fn(out1, gt1, feature_layers=feature_layers) + self.lam*F.l1_loss(out1, gt1)
-        loss2 = self.lam_p*self.loss_fn(out2, gt2, feature_layers=feature_layers) + self.lam*F.l1_loss(out2, gt2)
-        loss3 = self.lam_p*self.loss_fn(out3, gt3, feature_layers=feature_layers) + self.lam*F.l1_loss(out3, gt3)
+        loss1 = self.lam_p*self.loss_fn(out1, gt1, feature_layers=feature_layers) + self.lam*F.l1_loss(out1, gt1)+self.tvloss(out1)+ F.smooth_l1_loss(out1, gt1)
+        loss2 = self.lam_p*self.loss_fn(out2, gt2, feature_layers=feature_layers) + self.lam*F.l1_loss(out2, gt2)+ F.smooth_l1_loss(out2, gt2)
+        loss3 = self.lam_p*self.loss_fn(out3, gt3, feature_layers=feature_layers) + self.lam*F.l1_loss(out3, gt3)+ F.smooth_l1_loss(out3, gt3)
         
         return loss1+loss2+loss3      
