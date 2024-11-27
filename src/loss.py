@@ -58,7 +58,7 @@ class NewVGGPerceptualLoss(nn.Module):
 class VGGPerceptualLoss(nn.Module):
     def __init__(self, device):
         super(VGGPerceptualLoss, self).__init__()
-        vgg = models.vgg19(weights=True).features[:16]  # Until block3_conv3
+        vgg = models.vgg16(weights=True).features[:16]  # Until block3_conv3
         self.loss_model = vgg.to(device).eval()
         for param in self.loss_model.parameters():
             param.requires_grad = False
@@ -158,30 +158,39 @@ class CombinedLoss(nn.Module):
         smooth_l1_l = smooth_l1_loss(y_true, y_pred)
         ms_ssim_l = multiscale_ssim_loss(y_true, y_pred)
         perc_l = self.perceptual_loss_model(y_true, y_pred)
-        hist_l = histogram_loss(y_true, y_pred)
+        #hist_l = histogram_loss(y_true, y_pred)
         psnr_l = psnr_loss(y_true, y_pred)
         color_l = color_loss(y_true, y_pred)
         Edge_l= self.EdgeLoss(y_true, y_pred)
         Tv_l=self.tvloss(y_pred)
-        total_loss = (self.alpha1 * smooth_l1_l + self.alpha2 * perc_l + 
-                      self.alpha3 * hist_l + self.alpha5 * psnr_l + 
+        total_loss = (self.alpha1 * smooth_l1_l + self.alpha2 * perc_l +  self.alpha5 * psnr_l + 
                       self.alpha6 * color_l + self.alpha4 * ms_ssim_l+Edge_l+Tv_l)
 
         return torch.mean(total_loss)
     
 class multi_VGGPerceptualLoss(nn.Module):
-    def __init__(self,lam=1, lam_p=1):
+    def __init__(self,lam=1, lam_p=0.01):
         super(multi_VGGPerceptualLoss, self).__init__()
         self.loss_fn = NewVGGPerceptualLoss()
         self.lam = lam
         self.lam_p = lam_p
-        self.tvloss=TVLoss()
-    def forward(self, out1, out2, out3, gt1, feature_layers=[2]):
+        self.EdgeLoss= EdgeLoss()
+    def forward(self, out1, out2, out3, gt1, feature_layers=[0,1,2,3]):
         gt2 = F.interpolate(gt1, scale_factor=0.5, mode='bilinear', align_corners=False)
         gt3 = F.interpolate(gt1, scale_factor=0.25, mode='bilinear', align_corners=False)
         
-        loss1 = self.lam_p*self.loss_fn(out1, gt1, feature_layers=feature_layers) + self.lam*F.l1_loss(out1, gt1)+self.tvloss(out1)+ F.smooth_l1_loss(out1, gt1)
-        loss2 = self.lam_p*self.loss_fn(out2, gt2, feature_layers=feature_layers) + self.lam*F.l1_loss(out2, gt2)+ F.smooth_l1_loss(out2, gt2)
-        loss3 = self.lam_p*self.loss_fn(out3, gt3, feature_layers=feature_layers) + self.lam*F.l1_loss(out3, gt3)+ F.smooth_l1_loss(out3, gt3)
-        
-        return loss1+loss2+loss3      
+        loss1 = self.lam_p*self.loss_fn(out1, gt1, feature_layers=feature_layers) + self.lam*F.l1_loss(out1, gt1)+torch.mean(self.EdgeLoss(gt1,out1))
+        loss2 = self.lam_p*self.loss_fn(out2, gt2, feature_layers=feature_layers) + self.lam*F.l1_loss(out2, gt2)+torch.mean(self.EdgeLoss(gt2,out2))
+        loss3 = self.lam_p*self.loss_fn(out3, gt3, feature_layers=feature_layers) + self.lam*F.l1_loss(out3, gt3)+torch.mean(self.EdgeLoss(gt3,out3))
+        return loss1+0.3*loss2+0.2*loss3      
+    
+class temploss(nn.Module):
+    def __init__(self,lam=1, lam_p=0.01):
+        super(temploss, self).__init__()
+        self.loss_fn = NewVGGPerceptualLoss()
+        self.lam = lam
+        self.lam_p = lam_p
+        self.EdgeLoss= EdgeLoss()
+    def forward(self, out1, gt1, feature_layers=[2]):
+        loss1 = self.lam_p*self.loss_fn(out1, gt1, feature_layers=feature_layers) + self.lam*F.l1_loss(out1, gt1)+torch.mean(self.EdgeLoss(gt1,out1))
+        return loss1     

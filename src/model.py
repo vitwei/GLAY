@@ -4578,6 +4578,43 @@ class KANLinear(torch.nn.Module):
             + regularize_entropy * regularization_loss_entropy
         )
 
+class YUVtoRGB(nn.Module):
+    def __init__(self, standard="BT.601"):
+        super(YUVtoRGB, self).__init__()
+        
+        # 根据标准初始化转换系数
+        if standard == "BT.601":
+            self.a = torch.tensor(0.299, dtype=torch.float32)
+            self.b = torch.tensor(0.587, dtype=torch.float32)
+            self.c = torch.tensor(0.114, dtype=torch.float32)
+            self.d = torch.tensor(1.772, dtype=torch.float32)
+            self.e = torch.tensor(1.402, dtype=torch.float32)
+        elif standard == "BT.709":
+            self.a = nn.Parameter(torch.tensor(0.2126, dtype=torch.float32))
+            self.b = nn.Parameter(torch.tensor(0.7152, dtype=torch.float32))
+            self.c = nn.Parameter(torch.tensor(0.0722, dtype=torch.float32))
+            self.d = nn.Parameter(torch.tensor(1.8556, dtype=torch.float32))
+            self.e = nn.Parameter(torch.tensor(1.5748, dtype=torch.float32))
+        elif standard == "BT.2020":
+            self.a = nn.Parameter(torch.tensor(0.2627, dtype=torch.float32))
+            self.b = nn.Parameter(torch.tensor(0.6780, dtype=torch.float32))
+            self.c = nn.Parameter(torch.tensor(0.0593, dtype=torch.float32))
+            self.d = nn.Parameter(torch.tensor(1.8814, dtype=torch.float32))
+            self.e = nn.Parameter(torch.tensor(1.4746, dtype=torch.float32))
+        else:
+            raise ValueError("Unsupported standard. Choose from 'BT.601', 'BT.709', or 'BT.2020'.")
+        
+    def forward(self, yuv):
+        # 将 YUV 转换为 RGB
+        Y, Cb, Cr = yuv[:, 0, :, :], yuv[:, 1, :, :], yuv[:, 2, :, :]
+        
+        R = Y + self.e * (Cr - 0.5)
+        G = Y - (self.a * self.e / self.b) * (Cr - 0.5) - (self.c * self.d / self.b) * (Cb - 0.5)
+        B = Y + self.d * (Cb - 0.5)
+        
+        # 将结果组合为 RGB 图像
+        rgb = torch.stack((R, G, B), dim=1)
+        return rgb
 
 class DW_bn_relu(nn.Module):
     def __init__(self, dim=768):
@@ -4715,15 +4752,9 @@ class mymodelycbcr(nn.Module):
         [head1, head2, head3, head4] = heads
         self.colorEncoder =nn.Sequential(
             nn.Conv2d(3, ch1, 3, stride=1, padding=1,bias=False),
-            myencoderBlock(filters),
-            myencoderBlock(filters),
-            mydoubleconv(filters)
         )
         self.LightEncoder=nn.Sequential(
             nn.Conv2d(1, ch1, 3, stride=1, padding=1,bias=False),
-            myencoderBlock(filters),
-            myencoderBlock(filters),
-            mydoubleconv(filters)
         )    
 
         self.estimator = Illumination_Estimator(filters)
@@ -4734,7 +4765,9 @@ class mymodelycbcr(nn.Module):
         self.HVD_block3 = NormUpsample(ch4, ch3, use_norm = norm)
         self.HVD_block2 = NormUpsample(ch3, ch2, use_norm = norm)
         self.HVD_block1 = NormUpsample(ch2, ch1, use_norm = norm)
-
+        self.HVD_block0=nn.Sequential(
+            nn.Conv2d(ch1, 2, 3, stride=1, padding=1,bias=False),
+        )
         self.IE_block1 = NormDownsample(ch1, ch2, use_norm = norm)
         self.IE_block2 = NormDownsample(ch2, ch3, use_norm = norm)
         self.IE_block3 = NormDownsample(ch3, ch4, use_norm = norm)
@@ -4742,7 +4775,9 @@ class mymodelycbcr(nn.Module):
         self.ID_block3 = NormUpsample(ch4, ch3, use_norm=norm)
         self.ID_block2 = NormUpsample(ch3, ch2, use_norm=norm)
         self.ID_block1 = NormUpsample(ch2, ch1, use_norm=norm)
-        
+        self.ID_block0=nn.Sequential(
+            nn.Conv2d(ch1, 1, 3, stride=1, padding=1,bias=False),
+        )
         self.HV_LCA1 = MyI_LCA2(ch2, head2)
         self.HV_LCA2 = MyI_LCA2(ch3, head3)
         self.HV_LCA3 = MyI_LCA2(ch4, head4)
@@ -4750,22 +4785,15 @@ class mymodelycbcr(nn.Module):
         self.HV_LCA5 = MyI_LCA2(ch3, head3)
         self.HV_LCA6 = MyI_LCA2(ch2, head2)
         
-        self.kan1=kan(ch4,ch4)
-        self.kan2=kan(ch4,ch4)
+        #self.kan1=kan(ch4,ch4)
+        #self.kan2=kan(ch4,ch4)
         self.I_LCA1 = MyI_LCA2(ch2, head2)
         self.I_LCA2 = MyI_LCA2(ch3, head3)
         self.I_LCA3 = MyI_LCA2(ch4, head4)
         self.I_LCA4 = MyI_LCA2(ch4, head4)
         self.I_LCA5 = MyI_LCA2(ch3, head3)
         self.I_LCA6 = MyI_LCA2(ch2, head2)
-        self.fuse2=DetailFeatureExtractor(num_layers=1,dim=filters)
-        #self.fuse1=DetailFeatureExtractor(num_layers=1,dim=ch2)
-        #self.fuse0=DetailFeatureExtractor(num_layers=1,dim=ch3)
-        self.v2 = nn.Conv2d(filters*2,filters,3,1,1)
-        #self.v1 = nn.Conv2d(ch2*2,filters,3,1,1)
-        #self.v0 = nn.Conv2d(ch3*2,filters,3,1,1)
-        self.c = nn.Conv2d(filters,3,3,1,1)
-        self.sigmoid=Swish()
+        self._ycbcr_to_rgb=YUVtoRGB()
         self.apply(self._init_weights)
 
     def _rgb_to_ycbcr(self, image):
@@ -4824,10 +4852,10 @@ class mymodelycbcr(nn.Module):
         i_enc4 = self.I_LCA3(i_enc3, hv_3)
         hv_4 = self.HV_LCA3(hv_3, i_enc3)
 
-        i_enc4=self.kan1(i_enc4)
-        i_enc4=self.kan2(i_enc4)
-        hv_4=self.kan1(hv_4)
-        hv_4=self.kan2(hv_4)
+        #i_enc4=self.kan1(i_enc4)
+        #i_enc4=self.kan2(i_enc4)
+        #hv_4=self.kan1(hv_4)
+        #hv_4=self.kan2(hv_4)
 
         i_dec4 = self.I_LCA4(i_enc4,hv_4)
         hv_4 = self.HV_LCA4(hv_4, i_enc4)
@@ -4846,10 +4874,9 @@ class mymodelycbcr(nn.Module):
         
         i_dec1 = self.ID_block1(i_dec1, i_jump0)
         hv_1 = self.HVD_block1(hv_1, hv_jump0)
-        #fuse0=self.c(self.v0(self.fuse0(torch.cat([i_dec3,hv_3], dim=1))))
-        #fuse1=self.c(self.v1(self.fuse1(torch.cat([i_dec2,hv_2], dim=1))))
-        fuse2=self.c(self.sigmoid(self.v2(self.fuse2(torch.cat([i_dec1,hv_1], dim=1)))))
-        return fuse2#,fuse1,fuse0
+        V=self.ID_block0(i_dec1)
+        color=self.HVD_block0(hv_1)
+        return self._ycbcr_to_rgb(torch.cat([V,color],dim=1))
 
 
 class mymodel(nn.Module):
@@ -4888,4 +4915,3 @@ class net(nn.Module):
         final = out_unet + inputs
         return final
 ##########################################################################
-n

@@ -6,7 +6,7 @@ import torch.cuda.amp as amp
 from torch.utils.tensorboard import SummaryWriter   
 from torch.optim.lr_scheduler import CosineAnnealingLR,CosineAnnealingWarmRestarts,StepLR
 from src.utils import create_dataloaders,torchPSNR,torchSSIM,network_parameters,GradualWarmupScheduler,CosineAnnealingRestartLR,calculate_psnr,calculate_ssim
-from src.loss import CombinedLoss,multi_VGGPerceptualLoss
+from src.loss import CombinedLoss,multi_VGGPerceptualLoss,temploss
 import time
 from timm.utils import NativeScaler
 import random
@@ -21,21 +21,21 @@ torch.cuda.manual_seed_all(3407)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
-BATCH=4
+BATCH=32
 img_size=256
 
 
-model_dir='/home/huangweiyan/workspace/model/cv/checkpoint'
+model_dir='/home/huangweiyan/workspace/model/cv/checkpointback'
 model_restored=net()
 model_restored.cuda()
 
-checkpoint=torch.load(os.path.join(model_dir,'model_res.pth'))
-model_restored.load_state_dict(checkpoint['state_dict'],strict=False)
+#checkpoint=torch.load(os.path.join(model_dir,'model_latest.pth'))
+#model_restored.load_state_dict(checkpoint['state_dict'],strict=False)
 
 
 with torch.no_grad():
     model_restored.eval()
-    input=(torch.rand(1,3,256,256).cuda(),)
+    input=(torch.rand(1,3,400,600).cuda(),)
     flops=FlopCountAnalysis(model_restored,input)
 
 loss_scaler = NativeScaler()
@@ -48,25 +48,27 @@ train_loader,test_loader,radom_loader=create_dataloaders(train='/home/huangweiya
                                     test='/home/huangweiyan/workspace/model/cv/data/LOLv1/Test',
                                     crop_size=img_size,augimg=True,batch_size=BATCH)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-#Charloss = multi_VGGPerceptualLoss().to(device)
-Charloss=CombinedLoss('cuda')
-EPOCHS=200
+Charloss = multi_VGGPerceptualLoss().to(device)
+#Charloss=CombinedLoss('cuda')
+#Charloss=temploss().to(device)
+EPOCHS=1030
 TEST_AFTER=4
 p_number = network_parameters(model_restored)
 
-best_psnr = 22.18
-best_ssim = 0.8096
+best_psnr = 22.7
+best_ssim = 0.8174
 
 best_epoch_psnr = 0
 best_epoch_ssim = 0
 total_start_time = time.time()
 
-LR_INITIAL=1e-4
+LR_INITIAL=5e-5
 #optimizer=optim.SGD(model_restored.parameters(), lr=LR_INITIAL, momentum=0.9)
 optimizer = optim.Adam(model_restored.parameters(), lr=LR_INITIAL, betas=(0.9, 0.999),eps=1e-8, weight_decay=0.02)
 #scheduler_cosine =CosineAnnealingRestartLR(optimizer, periods=[300,700], restart_weights=(1,0.02))
-scheduler_cosine = optim.lr_scheduler.CosineAnnealingLR(optimizer, EPOCHS-3, eta_min=1e-8)
-scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=3, after_scheduler=scheduler_cosine)
+scheduler_cosine = optim.lr_scheduler.CosineAnnealingLR(optimizer, 100, eta_min=1e-8)
+
+scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=1, after_scheduler=scheduler_cosine)
 scheduler.step()
 
 
@@ -98,8 +100,9 @@ for epoch in range(1,EPOCHS+1):
         optimizer.zero_grad()
         target = data[0].cuda()
         input = data[1].cuda()
-        out2 = model_restored(input)
-        loss = Charloss(target,out2)
+        o1,o2,o3 = model_restored(input)
+        #loss = Charloss(target,o1)
+        loss = Charloss(o1,o2,o3, target)
         loss.backward()
         optimizer.step()
         epoch_loss +=loss.item()
@@ -107,7 +110,11 @@ for epoch in range(1,EPOCHS+1):
     writer.add_scalar('train/loss', epoch_loss, epoch)
     writer.add_scalar('train/lr', scheduler.get_lr()[0], epoch)
 
-    if epoch % TEST_AFTER == 0 or epoch>530:
+    if epoch % TEST_AFTER == 0:
+        for name, param in model_restored.named_parameters():
+            if param.grad is not None:
+                writer.add_histogram(f"{name}/grad", param.grad, epoch)  # 梯度直方图
+                writer.add_scalar(f"{name}/grad_norm", param.grad.norm(), epoch)  # 梯度范数
         model_restored.eval()
         psnr_val_rgb = []
         ssim_val_rgb = []
@@ -116,14 +123,14 @@ for epoch in range(1,EPOCHS+1):
                 target = test[0].cuda()
                 input = test[1].cuda()
                 h, w = target.shape[2], target.shape[3]
-                out2= model_restored(input)
-                #loss = Charloss(out2,out1,out0, target)
+                o1,o2,o3= model_restored(input)
+                loss = Charloss(o1,o2,o3, target)
                 #restored = restored[:, :, :h, :w]
-                loss = Charloss(target,out2)
+                #loss = Charloss(target,o1)
                 test_loss +=loss.item()
-                for res, tar in zip(out2, target):
+                for res, tar in zip(o1, target):
                     psnr_val_rgb.append(torchPSNR(res, tar))
-                    ssim_val_rgb.append(torchSSIM(out2, target))
+                    ssim_val_rgb.append(torchSSIM(o1, target))
             psnr_val_rgb = torch.stack(psnr_val_rgb).mean().item()
             ssim_val_rgb = torch.stack(ssim_val_rgb).mean().item()
             if psnr_val_rgb > best_psnr:
