@@ -6,4 +6,6 @@ src/vmamba
 *.pyc
 src/UHDM
 checkpointback/
-
+*.pth
+*.png
+*.txt

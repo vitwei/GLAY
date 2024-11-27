@@ -13,10 +13,13 @@ from pytorch_msssim import ssim
 from typing import Tuple
 import math
 from glob import glob
+import shutil
+
 import os
-from PIL import Image
 import torchvision.transforms as transforms
 from torchmetrics.functional import structural_similarity_index_measure
+from PIL import Image, ImageOps, ImageEnhance
+import skimage
 
 def network_parameters(nets):
     num_params = sum(param.numel() for param in nets.parameters())
@@ -39,7 +42,10 @@ class MixUp_AUG:
 
         return rgb_gt, rgb_noisy
 
-
+def load_img2(filepath):
+    img = Image.open(filepath).convert('RGB')
+    # y, _, _ = img.split()
+    return img
 def load_img(filepath):
     img = cv2.cvtColor(cv2.imread(filepath), cv2.COLOR_BGR2RGB)
     img = img.astype(np.float32)
@@ -181,7 +187,6 @@ class PairedImageDataset(Dataset):
                 apply_trans = transforms_aug[random.getrandbits(3)]
                 clean = getattr(augment, apply_trans)(clean)
                 noisy = getattr(augment, apply_trans)(noisy)   
-
         return clean, noisy,os.path.basename(low_image_path)
     
 
@@ -201,7 +206,21 @@ def create_dataloaders(train, test, crop_size=256,augimg=True,batch_size=1):
 
     return train_loader, test_loader,radom_loader
 
+def create_dataloaders2(train, test, crop_size=256,augimg=True,batch_size=1):
+    train_loader = None
+    test_loader = None
+    
+    if train:
+        hr_dir = os.path.join(train, 'target')
+        lr_dir = os.path.join(train, 'input')
+        train_dataset = DatasetFromFolder(hr_dir,lr_dir, patch_size=crop_size,upscale_factor=1,data_augmentation=augimg,transform=transform())
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8,drop_last=True)
 
+    if test:
+        test_dataset =  PairedImageDataset(test,training=False)
+        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
+
+    return train_loader, test_loader
 class GradualWarmupScheduler(_LRScheduler):
     """ Gradually warm-up(increasing) learning rate in optimizer.
     Proposed in 'Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour'.
@@ -493,3 +512,130 @@ class CosineAnnealingRestartLR(_LRScheduler):
             (1 + math.cos(math.pi * ((self.last_epoch - nearest_restart) / current_period)))
             for base_lr in self.base_lrs
         ]
+def mamabaugment(img_in, img_tar, flip_h=True, rot=True, noise=False):
+    info_aug = {'flip_h': False, 'flip_v': False, 'trans': False}
+
+    if random.random() < 0.5 and flip_h:
+        img_in = ImageOps.flip(img_in)
+        img_tar = ImageOps.flip(img_tar)
+        # img_bic = ImageOps.flip(img_bic)
+        info_aug['flip_h'] = True
+
+    if rot:
+        if random.random() < 0.5:
+            img_in = ImageOps.mirror(img_in)
+            img_tar = ImageOps.mirror(img_tar)
+            # img_bic = ImageOps.mirror(img_bic)
+            info_aug['flip_v'] = True
+        if random.random() < 0.5:
+            img_in = img_in.rotate(180)
+            img_tar = img_tar.rotate(180)
+            # img_bic = img_bic.rotate(180)
+            info_aug['trans'] = True
+    if noise:
+        # var=0.1 noise is already enormous
+        # add noise is whole img added !!
+        img_in = np.asarray(img_in)
+        img_in = skimage.util.random_noise(img_in, mode='gaussian', clip=True,var=0.02).astype('uint8')
+        img_in = Image.fromarray(img_in)
+    return img_in, img_tar, info_aug
+
+def is_image_file(filename):
+    return any(filename.endswith(extension) for extension in [".bmp", ".png", ".jpg", ".jpeg"])
+
+def transform():
+    return transforms.Compose([
+        transforms.ToTensor()
+    ])
+def delete_files(file_list):
+    for file_path in file_list:
+        try:
+            # 删除文件
+            os.remove(file_path)
+        except OSError as e:
+            print(f"错误: {file_path} - {e.strerror}")
+def copy_files_to_destination(file_list, destination_folder):
+    for file_path in file_list:
+        try:
+            # 构建目标文件路径
+            destination_path = os.path.join(destination_folder, os.path.basename(file_path))
+
+            # 复制文件
+            shutil.copy2(file_path, destination_path)
+        except Exception as e:
+            print(f"错误: {file_path} - {str(e)}")
+def checkpoint(model, save_folder):
+    if not os.path.exists(save_folder):
+        os.makedirs(save_folder)
+    model_out_path = os.path.join(save_folder, "best.pth")
+    torch.save(model.state_dict(), model_out_path)
+    print("Checkpoint saved to {}".format(model_out_path))
+    return model_out_path
+def checkpoint_last(model, save_folder):
+    if not os.path.exists(save_folder):
+        os.makedirs(save_folder)
+    model_out_path = os.path.join(save_folder, "last.pth")
+    torch.save(model.state_dict(), model_out_path)
+    print("Checkpoint saved to {}".format(model_out_path))
+    return model_out_path
+def get_training_set(data_dir, upscale_factor, patch_size, data_augmentation):
+    hr_dir = os.path.join(data_dir, 'target')
+    lr_dir = os.path.join(data_dir, 'input')
+    return DatasetFromFolder(hr_dir, lr_dir, patch_size, upscale_factor, data_augmentation,
+                              transform=transform())
+
+def get_patch(img_in, img_tar, patch_size, scale, ix=-1, iy=-1):
+    (ih, iw) = img_in.size
+    # (th, tw) = (scale * ih, scale * iw)
+
+    patch_mult = scale  # if len(scale) > 1 else 1
+    tp = patch_mult * patch_size
+    ip = tp // scale
+
+    if ix == -1:
+        ix = random.randrange(0, iw - ip + 1)
+    if iy == -1:
+        iy = random.randrange(0, ih - ip + 1)
+
+    (tx, ty) = (scale * ix, scale * iy)
+
+    img_in = img_in.crop((ty, tx, ty + tp, tx + tp))
+    img_tar = img_tar.crop((ty, tx, ty + tp, tx + tp))
+    # img_bic = img_bic.crop((ty, tx, ty + tp, tx + tp))
+
+    # info_patch = {
+    #    'ix': ix, 'iy': iy, 'ip': ip, 'tx': tx, 'ty': ty, 'tp': tp}
+
+    return img_in, img_tar
+
+class DatasetFromFolder(Dataset):
+    def __init__(self, HR_dir, LR_dir, patch_size, upscale_factor, data_augmentation,transform=None):
+        super(DatasetFromFolder, self).__init__()
+        self.hr_image_filenames = [os.path.join(HR_dir, x) for x in os.listdir(HR_dir) if is_image_file(x)]
+        self.lr_image_filenames = [os.path.join(LR_dir, x) for x in os.listdir(HR_dir) if is_image_file(x)]
+        self.patch_size = patch_size
+        self.upscale_factor = upscale_factor
+        self.transform = transform
+        self.data_augmentation = data_augmentation
+        # self.if_LAB = if_LAB
+    
+    def __getitem__(self, index):
+        target = load_img2(self.hr_image_filenames[index])
+        input = load_img2(self.lr_image_filenames[index])
+        input, target, = get_patch(input, target, self.patch_size, self.upscale_factor)
+
+        if self.data_augmentation:
+            img_in, img_tar, _ = mamabaugment(input, target)
+
+        if self.transform:
+            img_in = self.transform(img_in)
+            img_tar = self.transform(img_tar)
+
+        # if self.if_LAB:
+        #     img_in = colors.rgb_to_lab(img_in)
+        #     img_tar = colors.rgb_to_lab(img_tar)
+
+        return img_tar,img_in
+
+    def __len__(self):
+        return len(self.hr_image_filenames)
