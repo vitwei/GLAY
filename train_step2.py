@@ -15,13 +15,12 @@ from skimage.metrics._structural_similarity import structural_similarity as comp
 from skimage.metrics.simple_metrics import peak_signal_noise_ratio as compare_psnr
 from torch.utils.data import DataLoader
 from torchvision.transforms import ToTensor
-#from src.glnet import glnet_4g
-from src.glnet import glnet_4g,net
-
+import ipdb
 # from loss_ssim import SSIMa
 from src.utils import get_training_set, is_image_file,network_parameters
 from src.loss import TVLoss, VGGPerceptualLoss,SSIM,EdgeLoss
 from torch.utils.tensorboard import SummaryWriter
+from src.net import net
 import warnings
 from os.path import join, isfile
 
@@ -63,16 +62,16 @@ def histogram_loss(tensor1, tensor2):
 
 
 def cfg():
-    parser = argparse.ArgumentParser(description='low-light image enhancement by SMNet')
+    parser = argparse.ArgumentParser(description='low-light image enhancement by VMLL')
     parser.add_argument('--trainset', type=str, default='/home/huangweiyan/workspace/model/cv/data/LOLv1/Train', help='location of trainset')
     parser.add_argument('--testset', type=str, default='/home/huangweiyan/workspace/model/cv/data/LOLv1/Test', help='location of testset')
     parser.add_argument('--output', default='output', help='location to save output images')
-    parser.add_argument('--modelname', default='realycbcr', help='define model name')
+    parser.add_argument('--modelname', default='tanh', help='define model name')
     parser.add_argument('--deviceid', default="0", help='selecte which gpu device')
-    parser.add_argument('--lr', type=float, default=5e-4, help='Learning Rate')
-    parser.add_argument('--lr_min', type=float, default=5e-5, help='Minimum Learning Rate')
+    parser.add_argument('--lr', type=float, default=2e-3, help='Learning Rate')
+    parser.add_argument('--lr_min', type=float, default=2e-4, help='Minimum Learning Rate')
     parser.add_argument('--batchSize', type=int, default=8, help='training batch size')
-    parser.add_argument('--nEpochs', type=int, default=600, help='number of epochs to train for')
+    parser.add_argument('--nEpochs', type=int, default=400, help='number of epochs to train for')
     parser.add_argument('--snapshots', type=int, default=1, help='Snapshots')
     parser.add_argument('--start_iter', type=int, default=0, help='Starting Epoch')
     parser.add_argument('--gpu_mode', type=bool, default=True)
@@ -80,6 +79,7 @@ def cfg():
     parser.add_argument('--seed', type=int, default=123, help='random seed to use. Default=123')
     parser.add_argument('--gpus', default=1, type=int, help='number of gpu')
     parser.add_argument('--patch_size', type=int, default=256, help='Size of cropped LR image')
+    parser.add_argument('--weights_path', type=str, default="/home/huangweiyan/workspace/model/cv/models/newftanh/best.pth", help='initial BEE weight')
     opt = parser.parse_args()
     return opt
 
@@ -253,8 +253,7 @@ def C_DIVIDE_A(tensor1, tesnor2):
 
 
 def main(opt):
-    log_dir = os.path.join('/home/huangweiyan/workspace/model/cv/log', opt.modelname)
-    writer = SummaryWriter(log_dir)
+    writer = logging(os.path.join('tensorboard', opt.modelname))
     txt_name = 'metrics_' + opt.modelname + '.txt'
     with open(txt_name, mode='w') as txt_write:
         cuda = opt.gpu_mode
@@ -279,7 +278,15 @@ def main(opt):
         # =============================#
         print('===> Build model')
         lighten = net()
+        loaded_weights = torch.load(opt.weights_path)
+        lighten.load_state_dict(loaded_weights, strict=False)
+        for name, param in lighten.named_parameters():
+            if name in loaded_weights:
+                param.requires_grad = False
 
+        # Optional：检查设置是否成功
+        for name, param in lighten.named_parameters():
+            print(name, param.requires_grad)
 
         device = torch.device('cuda:' + opt.deviceid)
         lighten.to(device)
@@ -296,14 +303,12 @@ def main(opt):
         ssim = SSIM()
         percep_loss = VGGPerceptualLoss('cuda')
         smooth_criterion = nn.SmoothL1Loss()
-        edge=EdgeLoss()
         if cuda:
             gpus_list = range(opt.gpus)
             mse_loss = mse_loss.to(device)
             L1_criterion = L1_criterion.to(device)
             TV_loss = TV_loss.to(device)
             ssim = ssim.to(device)
-            edge=edge.to(device)
             percep_loss = percep_loss.to(device)
             smooth_criterion = smooth_criterion.to(device)
 
@@ -332,24 +337,30 @@ def main(opt):
                     LL_t = LL_t.to(device)
                     NL_t = NL_t.to(device)
                 t0 = time.time()
-                #LL_t_flatten = torch.flatten(LL_t)
+                LL_t_flatten = torch.flatten(LL_t)
                 pred_t = lighten(LL_t)
                 ori, ori_1 = C_DIVIDE_A(NL_t, LL_t)
                 label, label_1 = C_DIVIDE_A(pred_t, LL_t)
 
                 his_loss = histogram_loss(pred_t, NL_t)
                 histogram_loss_B = histogram_loss(ori, label)
+
+
+                pred_t_flatten = torch.flatten(pred_t)
+
+                inner_loss = torch.dot(pred_t_flatten, LL_t_flatten) / (LL_t.shape[0]) / (LL_t.shape[1]) / (
+                    LL_t.shape[2]) / (LL_t.shape[3])
                 ssim_loss = 1 - ssim(pred_t, NL_t)
                 tv_loss = TV_loss(pred_t)
                 p_loss = percep_loss(pred_t, NL_t)
-                smoothloss = L1_criterion(pred_t, NL_t)
-                edgeloss=edge(pred_t, NL_t)
-                loss = 2 * ssim_loss + 1.2 * p_loss + 0.8 * smoothloss+ 0.01 * tv_loss + 1 * his_loss + 1 * histogram_loss_B+edgeloss  # 2024 1 24 1404 PSNR 20.09 0.8348
+                smoothloss = smooth_criterion(pred_t, NL_t)
+                loss = 2 * ssim_loss + 1.2 * p_loss + 0.8 * smoothloss + 1 * inner_loss + 0.01 * tv_loss + 1 * his_loss + 1 * histogram_loss_B  # 2024 1 24 1404 PSNR 20.09 0.8348
+                # loss = 2 * ssim_loss + 2 * p_loss + 0.8 * smoothloss + 1 * inner_loss + 0.01 * tv_loss + 1 * his_loss + 1 * histogram_loss_B
                 writer.add_scalar('ssim_loss', ssim_loss, over_Iter)
                 writer.add_scalar('tv_loss', tv_loss * 0.01, over_Iter)
                 writer.add_scalar('perceptual_loss', p_loss, over_Iter)
                 writer.add_scalar('smooth_loss', smoothloss, over_Iter)
-                writer.add_scalar('edge_loss', edgeloss, over_Iter)
+                writer.add_scalar('inner_loss', inner_loss, over_Iter)
                 writer.add_scalar('histogram_loss_B', histogram_loss_B, over_Iter)
                 loss.backward()
                 optimizer.step()
@@ -364,7 +375,7 @@ def main(opt):
                         "tv_loss": tv_loss.data,
                         "percep_loss": p_loss.data,
                         "smooth_loss": smoothloss,
-                        "edge_loss": edgeloss,
+                        "inner_loss": inner_loss,
                         "histogram_loss_B": histogram_loss_B,
                     }
                     log_metrics(logs, over_Iter)
@@ -373,7 +384,7 @@ def main(opt):
             writer.add_scalar('epoch_loss', float(epoch_loss / len(training_data_loader)), epoch)
             print("===> Epoch {} Complete: Avg. Loss: {:.4f}; ==> {:.2f} seconds".format(epoch, epoch_loss / len(
                 training_data_loader), time.time() - tStart_epoch))
-            if epoch>30:
+            if epoch % (opt.snapshots) == 0:
                 psnr_score, ssim_score = eval(lighten, epoch, writer, txt_write, opt)
                 logs = {
                     "psnr": psnr_score,
