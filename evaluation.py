@@ -115,6 +115,6 @@ def measure_dirs(dirA, dirB, use_gpu, verbose=False,GT_mean=True):
 
 
 
-dirB='/home/huangweiyan/workspace/model/cv/output/realycbcr/best'
+dirB='/home/huangweiyan/workspace/model/cv/output/newdec1/best'
 dirA='/home/huangweiyan/workspace/model/cv/data/LOLv1/Test/target'
-measure_dirs(dirA, dirB, use_gpu=False, verbose=True,GT_mean=False)
+measure_dirs(dirA, dirB, use_gpu=False, verbose=True,GT_mean=True)

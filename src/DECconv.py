@@ -111,7 +111,7 @@ class DEConv(nn.Module):
         self.conv1_2 = Conv2d_hd(dim, dim, 3, bias=True)
         self.conv1_3 = Conv2d_vd(dim, dim, 3, bias=True)
         self.conv1_4 = Conv2d_ad(dim, dim, 3, bias=True)
-        self.conv1_5 = nn.Conv2d(dim, dim, 3, padding=1, bias=True)
+        self.conv1_5 = nn.Conv2d(dim, dim, 1, padding=0, bias=True)
 
     def forward(self, x):
         w1, b1 = self.conv1_1.get_weight()
@@ -131,7 +131,7 @@ class DEBlock(nn.Module):
         self.conv1 = DEConv(dim)
         self.norm=nn.BatchNorm2d(dim, eps=0.0001, momentum = 0.95)
         self.act1 = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(dim, dim, kernel_size, padding=1,bias=True)
+        self.conv2 = nn.Conv2d(dim, dim, 1, padding=0,bias=True)
 
     def forward(self, x):
         res = self.conv1(x)

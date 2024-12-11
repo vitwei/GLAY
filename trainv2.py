@@ -67,7 +67,7 @@ def cfg():
     parser.add_argument('--trainset', type=str, default='/home/huangweiyan/workspace/model/cv/data/LOLv1/Train', help='location of trainset')
     parser.add_argument('--testset', type=str, default='/home/huangweiyan/workspace/model/cv/data/LOLv1/Test', help='location of testset')
     parser.add_argument('--output', default='output', help='location to save output images')
-    parser.add_argument('--modelname', default='realycbcr', help='define model name')
+    parser.add_argument('--modelname', default='lolv1wkanball', help='define model name')
     parser.add_argument('--deviceid', default="0", help='selecte which gpu device')
     parser.add_argument('--lr', type=float, default=5e-4, help='Learning Rate')
     parser.add_argument('--lr_min', type=float, default=5e-5, help='Minimum Learning Rate')

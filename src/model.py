@@ -1751,13 +1751,13 @@ class CAB(nn.Module):
         self.pos_emb = nn.Linear(dim, dim,bias=bias)
         self.act=nn.Tanh()
         self.threshold=nn.Parameter(torch.zeros(1))
-    def forward(self, x, y):
+    def forward(self, x):
         b,h,w,c= x.shape
         x=self.norm(x)
         x_emb=self.pos_emb(x)
         y=self.norm(y)
         q = self.q(x)
-        kv = self.kv_dwconv(self.kv(y))
+        kv = self.kv_dwconv(self.kv(x))
         k, v = kv.chunk(2, dim=-1)
 
         q = rearrange(q, 'b h w (head c) -> b head c (h w)', head=self.num_heads)
@@ -1787,13 +1787,9 @@ class globalCAB(nn.Module):
         self.kv = nn.Linear(dim, dim*2,bias=bias)
         self.kv_dwconv = nn.Linear(dim*2, dim*2,bias=bias)
         self.project_out = nn.Linear(dim, dim,bias=bias)
-        self.pos_emb = nn.Linear(dim, dim,bias=bias)
-        self.act=nn.Tanh()
-        self.threshold=nn.Parameter(torch.zeros(1))
     def forward(self, x, y):
         b,h,w,c= x.shape
         x=self.norm(x)
-        x_emb=self.pos_emb(x)
         y=self.norm(y)
         q = self.q(x)
         kv = self.kv_dwconv(self.kv(y))
@@ -1814,7 +1810,7 @@ class globalCAB(nn.Module):
         out = rearrange(out, 'b head c (h w) -> b h w (head c)', head=self.num_heads, h=h, w=w)
 
         out = self.project_out(out)
-        return x+self.act(self.threshold)*(out+x_emb)
+        return out
 
 
 class RDCAB(nn.Module):
@@ -2075,121 +2071,7 @@ class OutputProj(nn.Module):
             x = self.norm(x)
         return x
 #############TransResNet############
-class TransResNetBlockD2(nn.Module):
-    def __init__(self, dim=512,dd_in=64,kernel_size=3, stride=1, norm_layer=None,act_layer=None):
-        super().__init__()
-        self.proj0=nn.Conv2d(in_channels=dim//2, out_channels=dd_in, kernel_size=3, padding=1, bias=False)
-        self.proj1 = nn.Sequential(
-            nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(dim, eps=0.0001, momentum = 0.95),
-            nn.GELU(),
-            nn.Conv2d(in_channels=dim, out_channels=dd_in, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(dd_in, eps=0.0001, momentum = 0.95),
-            nn.GELU()
-            )
-        self.proj2 = nn.Sequential(
-            nn.Conv2d(in_channels=dd_in, out_channels=dd_in, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(dd_in,eps=0.0001, momentum = 0.95),
-            nn.GELU(),
-            nn.Conv2d(in_channels=dd_in, out_channels=dd_in, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(dd_in, eps=0.0001, momentum = 0.95),
-            nn.GELU()
-            )
 
-    def forward(self, x,y):
-        inputs=torch.cat([x,y],dim=1)#512 
-        y=self.proj0(y)#
-        inputs=self.proj1(inputs)+y
-        result=inputs+self.proj2(inputs)
-        return result
-
-class TransResNetBlockD3(nn.Module):
-    def __init__(self, dim=64, out_channel=3, kernel_size=3, stride=1, norm_layer=None,act_layer=None):
-        super().__init__()
-        self.proj0 = nn.Sequential(
-            nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(dim, eps=0.0001, momentum = 0.95),
-            nn.GELU(),
-            )
-        self.proj1 = nn.Sequential(
-            nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(dim, eps=0.0001, momentum = 0.95),
-            nn.GELU(),
-            )
-        self.proj2= nn.Sequential(
-            nn.Conv2d(in_channels=dim*2, out_channels=dim*2, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(dim*2, eps=0.0001, momentum = 0.95),
-            nn.GELU(),
-            )
-    def forward(self,x,y):
-        x=self.proj0(x)
-        y=self.proj1(y)
-        inputs=torch.cat([x,y],dim=1) 
-        inputs= self.proj2(inputs)
-        return inputs
-
-class TransResNetAttention(nn.Module):
-    def __init__(self, dim1=64,dim2=128,hidden_dim=128, num_heads=4, bias=False):
-        super().__init__()
-        self.proj0= nn.Sequential(
-            nn.Conv2d(in_channels=dim1, out_channels=hidden_dim, kernel_size=3, padding=1, bias=bias),
-            nn.BatchNorm2d(hidden_dim, eps=0.0001, momentum = 0.95),
-            nn.GELU(),
-            )
-        self.proj1= nn.Sequential(
-            nn.Conv2d(in_channels=dim2, out_channels=hidden_dim, kernel_size=3, padding=1, bias=bias),
-            nn.BatchNorm2d(hidden_dim, eps=0.0001, momentum = 0.95),
-            nn.GELU(),
-            )
-        self.norm0= LayerNorm(hidden_dim)
-        self.norm1= LayerNorm(hidden_dim)
-        self.num_heads = num_heads
-        self.temperature = nn.Parameter(torch.ones(num_heads*2, 1, 1))
-
-        self.q0 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=bias)
-        self.q_dwconv0 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1, groups=hidden_dim, bias=bias)
-        self.kv0 = nn.Conv2d(hidden_dim, hidden_dim*2, kernel_size=1, bias=bias)
-        self.kv_dwconv0 = nn.Conv2d(hidden_dim*2, hidden_dim*2, kernel_size=3, stride=1, padding=1, groups=hidden_dim*2, bias=bias)
-        self.q1 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=bias)
-        self.q_dwconv1 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1, groups=hidden_dim, bias=bias)
-        self.kv1= nn.Conv2d(hidden_dim, hidden_dim*2, kernel_size=1, bias=bias)
-        self.kv_dwconv1= nn.Conv2d(hidden_dim*2, hidden_dim*2, kernel_size=3, stride=1, padding=1, groups=hidden_dim*2, bias=bias)        
-        self.project_out = nn.Conv2d(hidden_dim*2, hidden_dim//2, kernel_size=1, bias=bias)
-    def forward(self, x,y):
-        b,c,h,w=x.shape#torch.Size([1, 128, 50,75])
-        x=self.proj0(x)
-        y=self.proj1(y)
-
-        xnorm=self.norm0(x)
-        ynorm=self.norm1(y)
-
-        q0 = self.q_dwconv0(self.q0(xnorm))
-        kv0 = self.kv_dwconv0(self.kv0(ynorm))
-        q1 = self.q_dwconv0(self.q1(y))
-        kv1 = self.kv_dwconv0(self.kv1(y))
-
-        k0, v0 = kv0.chunk(2, dim=1)
-        k1, v1 = kv1.chunk(2, dim=1)
-
-        q0 = rearrange(q0, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-        k0 = rearrange(k0, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-        v0 = rearrange(v0, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-
-        q1 = rearrange(q1, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-        k1 = rearrange(k1, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-        v1 = rearrange(v1, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-
-        q = torch.nn.functional.normalize(torch.cat([q0,q1],dim=1), dim=-1)
-        k = torch.nn.functional.normalize(torch.cat([k0,k1],dim=1), dim=-1)
-
-        attn = (q @ k.transpose(-2, -1)) * self.temperature
-        attn = torch.nn.functional.softmax(attn,dim=-1)
-
-        out = (attn @ torch.cat([v0,v1],dim=1))
-
-        out = rearrange(out, 'b head c (h w) -> b (head c) h w', head=self.num_heads*2, h=h, w=w)
-        out = self.project_out(out)#torch.Size([1, 64, 50, 75])
-        return out
 ############Mamba out#################
 class Linear2d(nn.Linear):
     def forward(self, x: torch.Tensor):
@@ -2508,41 +2390,6 @@ class MambaVblock(nn.Module):
         return y
 
 #########Bayesian###############################
-DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
-
-
-def _no_grad_trunc_normal_(
-    tensor, mean, std, a, b
-):
-    def norm_cdf(x):
-        return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
-
-    if (mean < a - 2 * std) or (mean > b + 2 * std):
-        warnings.warn(
-            "mean is more than 2 std from [a, b] in nn.init.trunc_normal_. "
-            "The distribution of values may be incorrect.",
-            stacklevel=2,
-        )
-
-    with torch.no_grad():
-        l = norm_cdf((a - mean) / std)
-        u = norm_cdf((b - mean) / std)
-        tensor.uniform_(2 * l - 1, 2 * u - 1)
-        tensor.erfinv_()
-        tensor.mul_(std * math.sqrt(2.0))
-        tensor.add_(mean)
-        tensor.clamp_(min=a, max=b)
-
-        return tensor
-
-
-def trunc_normal_(
-    tensor, mean=0.0, std=1.0, a=-2.0, b=2.0
-):
-    return _no_grad_trunc_normal_(tensor, mean, std, a, b)
-
-
-
 
 class PatchMerging(nn.Module):
     """Patch Merging Layer.
@@ -3142,6 +2989,7 @@ class LayerNormalization(nn.Module):
 class SEBlock(nn.Module):
     def __init__(self, input_channels, reduction_ratio=16):
         super(SEBlock, self).__init__()
+        self.conv=nn.Conv2d(input_channels,input_channels, kernel_size=5, padding=2, groups=input_channels)
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc1 = nn.Linear(input_channels, input_channels // reduction_ratio)
         self.fc2 = nn.Linear(input_channels // reduction_ratio, input_channels)
@@ -3149,6 +2997,7 @@ class SEBlock(nn.Module):
 
     def forward(self, x):
         batch_size, num_channels, _, _ = x.size()
+        x=self.conv(x)
         y = self.pool(x).reshape(batch_size, num_channels)
         y = F.relu(self.fc1(y))
         y = torch.tanh(self.fc2(y))
@@ -4613,6 +4462,7 @@ class kan(nn.Module):
 
     def forward(self, x):
         # pdb.set_trace()
+        x=x.permute(0,2,3,1)
         B,H,W,C=x.shape
         x=x.view(B,-1,C)
         B, N, C = x.shape
@@ -4630,10 +4480,39 @@ class kan(nn.Module):
         x = x.reshape(B,N,C).contiguous()
         x = self.dwconv_3(x, H, W)
     
-        x=x.view(B,H,W,C)
+        x=x.view(B,H,W,C).permute(0,3,1,2)
         return x
 
+class KANBlock(nn.Module):
+    def __init__(self, dim, drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=LayerNorm):
+        super().__init__()
 
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        mlp_hidden_dim = int(dim)
+        self.norm1=norm_layer(dim)
+        self.layer = kan(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, nn.Conv2d):
+            fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+            fan_out //= m.groups
+            m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
+            if m.bias is not None:
+                m.bias.data.zero_()
+
+    def forward(self, x):
+        x = x + self.drop_path(self.layer(x))
+
+        return self.norm1(x)
 
 
 

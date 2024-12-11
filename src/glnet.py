@@ -10,22 +10,7 @@ from timm.models.layers import DropPath, LayerNorm2d, trunc_normal_
 from einops import rearrange, repeat
 from src.DECconv import DEBlock
 import ipdb
-_glnet_ckpt_urls= {
-    'glnet_4g': 'https://api.onedrive.com/v1.0/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL3UvcyFBa0JiY3pkUmxadkN5RzlEalNfQU1xbkpRaVgxP2U9dE9raEhQ/root/content',
-    'glnet_9g': 'https://api.onedrive.com/v1.0/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL3UvcyFBa0JiY3pkUmxadkN5RUdGUTZrZldWLXdWWmVpP2U9d1d3Ujh6/root/content',
-    'glnet_16g': 'https://api.onedrive.com/v1.0/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL3UvcyFBa0JiY3pkUmxadkN5amFCeEMzaC1COENIV01tP2U9R2ZSMGtn/root/content',
-    'glnet_stl': 'https://api.onedrive.com/v1.0/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL3UvcyFBa0JiY3pkUmxadkN5QkZhQUlMRU11X2R0YmJWP2U9OUdoaGkz/root/content',
-    'glnet_stl_paramslot': 'https://api.onedrive.com/v1.0/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL3UvcyFBa0JiY3pkUmxadkN5RzBlYXQ1ekNFOXVwY1FSP2U9dm1ibW8x/root/content',
-    'glnet_4g_tklb': 'https://api.onedrive.com/v1.0/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL3UvcyFBa0JiY3pkUmxadkN5QVdjT2RsVFVhMkozdnNYP2U9d0U0Y2gx/root/content',
-    'glnet_9g_tklb': 'https://api.onedrive.com/v1.0/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL3UvcyFBa0JiY3pkUmxadkN5blBFY2ctZkM3WkRDTUV0P2U9Ynd1ZmVS/root/content',
-}
-
-def _load_from_url(model:nn.Module, ckpt_key:str, state_dict_key:str='model'):
-    url = _glnet_ckpt_urls[ckpt_key]
-    checkpoint = torch.hub.load_state_dict_from_url(url=url,
-        map_location="cpu", check_hash=True, file_name=f"{ckpt_key}.pth")
-    model.load_state_dict(checkpoint[state_dict_key])
-    return model
+from src.model import KANBlock
 
 class ResDWConvNCHW(nn.Conv2d):
     def __init__(self, dim, ks:int=3) -> None:
@@ -284,20 +269,9 @@ class myGLMixBlock(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             batch_first=True) if use_slot_attention else nn.Identity()
-        self.feature_conv = nn.Sequential(
-            nn.Conv2d(embed_dim, embed_dim, 1), # pseudo qkv linear
-            nn.Conv2d(embed_dim, embed_dim, local_dw_ks, padding=local_dw_ks//2, groups=embed_dim), # pseudo attention
-            nn.Conv2d(embed_dim, embed_dim, 1), # pseudo out linear
-        ) if local_dw_ks > 0 else nn.Identity()
-        
         # per-location embedding
         self.norm2 = norm_layer(embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Conv2d(embed_dim, int(mlp_ratio*embed_dim), kernel_size=1),
-            ResDWConvNCHW(int(mlp_ratio*embed_dim),ks=3) if mlp_dw else nn.Identity(),
-            nn.GELU(),
-            nn.Conv2d(int(mlp_ratio*embed_dim), embed_dim, kernel_size=1)
-        )
+        self.mlp =FRFN(embed_dim,embed_dim*2)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         # layer scale
@@ -305,14 +279,10 @@ class myGLMixBlock(nn.Module):
             if layerscale > 0 else nn.Identity()
         self.ls2 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
             if layerscale > 0 else nn.Identity()
-        self.enlarger = nn.Sequential(
-            nn.BatchNorm2d(embed_dim),
-            nn.LeakyReLU(),
-            nn.Conv2d(embed_dim,embed_dim,kernel_size=3,padding=1)
-        )
-        # NOTE: hack, for visualization with forward hook
         self.vis_proxy = nn.Identity()
-        
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+
     def _forward_relation(self, x:torch.Tensor, init_slots:torch.Tensor):
         """
         x: (bs, c, h, w) tensor
@@ -331,11 +301,10 @@ class myGLMixBlock(nn.Module):
 
         # soft ungrouping
         out = torch.softmax(logits.transpose(-1, -2), dim=-1) @ slots # (bs, h*w, c)
-    
-        out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        #out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
         # # fuse with locally enhanced features
-        out = out + self.feature_conv(x)
 
+        out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
         return out, slots
 
     def forward(self, x:torch.Tensor):
@@ -362,12 +331,808 @@ class myGLMixBlock(nn.Module):
         x = shortcut + self.drop_path(self.ls1(x))
         x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
 
-        return x,self.enlarger(copy-x)
+        return x,copy-x
     
     def extra_repr(self) -> str:
         return f"scale_mode={self.scale_mode}, "\
                f"slot_init={self.slot_init}, "\
                f"use_slot_attention={self.use_slot_attention}"
+
+
+
+class RetinxGLMixBlock(nn.Module):
+    """
+    multihead attention with soft grouping + MLP
+    """
+    def __init__(self,
+        embed_dim:int,
+        num_heads:int,
+        num_slots:int=64,
+        slot_init:str='ada_avgpool',
+        slot_scale:float=None,
+        scale_mode='learnable',
+        local_dw_ks:int=5,
+        mlp_ratio:float=4.,
+        drop_path:float=0.,
+        norm_layer=LayerNorm2d,
+        cpe_ks:int=0, # if > 0, the kernel size of the conv pos embedding
+        mlp_dw:bool=False,
+        layerscale=-1,
+        use_slot_attention:bool=True,
+        ) -> None:
+
+        super().__init__()
+        self.embed_dim = embed_dim
+        slot_scale = slot_scale or embed_dim ** (-0.5)
+        self.scale_mode = scale_mode
+        self.use_slot_attention = use_slot_attention
+        assert scale_mode in {'learnable', 'const'}
+        if scale_mode  == 'learnable':
+            self.slot_scale = nn.Parameter(torch.tensor(slot_scale))
+        else: # const
+            self.register_buffer('slot_scale', torch.tensor(slot_scale))
+
+        # convolutional position encoding
+        self.with_conv_pos_emb = (cpe_ks > 0)
+        if self.with_conv_pos_emb:
+            self.pos_conv = nn.Conv2d(
+                embed_dim, embed_dim,
+                kernel_size=cpe_ks,
+                padding=cpe_ks//2, groups=embed_dim)
+
+        # slot initialization
+        assert slot_init in {'param', 'ada_avgpool','ada_maxpool'}
+        self.slot_init = slot_init
+        if self.slot_init == 'param':
+            self.init_slots = nn.Parameter(
+                torch.empty(1, num_slots, embed_dim), True)
+            torch.nn.init.normal_(self.init_slots, std=.02)
+        else:
+            self.pool_size = math.isqrt(num_slots)
+            # TODO: relax the square number constraint
+            assert self.pool_size**2 == num_slots
+        
+        # spatial mixing
+        self.norm1 = norm_layer(embed_dim//2)
+        self.relation_mha = nn.MultiheadAttention(
+            embed_dim=embed_dim//2,
+            num_heads=num_heads//2,
+            batch_first=True) if use_slot_attention else nn.Identity()
+        # per-location embedding
+        self.norm2 = norm_layer(embed_dim)
+        self.mlp =FRFN(embed_dim,embed_dim*2)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # layer scale
+        self.ls1 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.ls2 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.vis_proxy = nn.Identity()
+        self.color=nn.Parameter(torch.ones((1, 64, embed_dim//2)), requires_grad=True)
+
+    def _forward_relation(self, x:torch.Tensor, init_slots:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        x_flatten = x.permute(0, 2, 3, 1).flatten(1, 2)
+        logits = F.normalize(init_slots, p=2, dim=-1) @ \
+            (self.slot_scale*F.normalize(x_flatten, p=2, dim=-1).transpose(-1, -2)) # (bs, num_slots, l)
+        # soft grouping
+        slots = torch.softmax(logits, dim=-1) @ x_flatten # (bs, num_slots, c)
+        # cluster update with mha
+        slots, attn_weights = self.relation_mha(query=slots, key=slots, value=slots, need_weights=False)
+
+        if not self.training: # hack, for visualization
+            logits, attn_weights = self.vis_proxy((logits, attn_weights))
+
+        # soft ungrouping
+        out = torch.softmax(logits.transpose(-1, -2), dim=-1) @ slots # (bs, h*w, c)
+        #out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        # # fuse with locally enhanced features
+
+        out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        return out, slots
+
+    def forward(self, x:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        b,c,h,w=x.shape
+        copy=x
+        light,color=x.chunk(2,dim=1)
+        if self.slot_init == 'ada_avgpool':
+            light_slots = F.adaptive_avg_pool2d(light, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+            color_slots= F.adaptive_avg_pool2d(color, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        elif self.slot_init == 'ada_maxpool':
+            light_slots = F.adaptive_max_pool2d(light, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+            color_slots= F.adaptive_max_pool2d(color, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        else:
+            init_slots = self.init_slots
+        # print(x.dtype, init_slots.dtype) -> float16 float32
+        if self.with_conv_pos_emb:
+            x = x + self.pos_conv(x)
+
+        shortcut = x
+        y,c=x.chunk(2,dim=1)
+        y, updt_slots = self._forward_relation(self.norm1(y), light_slots)
+        c, updt_slots = self._forward_relation(self.norm1(c), color_slots)
+        x= torch.cat([y,c],dim=1)
+        x = shortcut + self.drop_path(self.ls1(x))
+        x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
+
+        return x,copy-x
+    
+
+class IG_MSA(nn.Module):
+    def __init__(
+            self,
+            dim,
+            dim_head=64,
+            heads=4,
+    ):
+        super().__init__()
+        self.num_heads = heads
+        self.dim_head = dim_head
+        self.to_q = nn.Linear(dim, dim_head * heads, bias=False)
+        self.to_k = nn.Linear(dim, dim_head * heads, bias=False)
+        self.to_v = nn.Linear(dim, dim_head * heads, bias=False)
+        self.to_L = nn.Linear(dim, dim_head * heads, bias=False)
+        self.rescale = nn.Parameter(torch.ones(heads, 1, 1))
+        self.proj = nn.Linear(dim_head * heads, dim, bias=True)
+
+        self.dim = dim
+
+    def forward(self, x_in, illu_fea_trans):
+        """
+        x_in: [b,h,w,c]   
+        illu_fea: [b,h,w,c]       
+        return out: [b,h,w,c]
+        """
+        b, c, h, w = x_in.shape
+        #ipdb.set_trace()
+
+        x_in=x_in.permute(0,2,3,1)
+        x = x_in.reshape(b, h * w, c)
+
+        illu_attn=self.to_L(illu_fea_trans.permute(0,2,3,1).flatten(1,2)).reshape(b, h * w, -1)
+        
+        q_inp = self.to_q(x)
+        k_inp = self.to_k(x)
+        v_inp = self.to_v(x)
+        q, k, v, illu_attn = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.num_heads),
+                                 (q_inp, k_inp, v_inp, illu_attn))
+        v = v * illu_attn
+        # q: b,heads,hw,c
+        q = q.transpose(-2, -1)
+        k = k.transpose(-2, -1)
+        v = v.transpose(-2, -1)
+        q = F.normalize(q, dim=-1, p=2)
+        k = F.normalize(k, dim=-1, p=2)
+        attn = (k @ q.transpose(-2, -1))   # A = K^T*Q
+        attn = attn * self.rescale
+        attn = attn.softmax(dim=-1)
+        x = attn @ v   # b,heads,d,hw
+        x = x.permute(0, 3, 1, 2)    # Transpose
+        x = x.reshape(b, h * w, self.num_heads * self.dim_head)
+        out_c = self.proj(x).view(b, h, w, c)
+        out=out_c.permute(0,3,1,2)
+        return out
+class RetinxGLMixBlockV2(nn.Module):
+    """
+    multihead attention with soft grouping + MLP
+    """
+    def __init__(self,
+        embed_dim:int,
+        num_heads:int,
+        num_slots:int=64,
+        slot_init:str='ada_avgpool',
+        slot_scale:float=None,
+        scale_mode='learnable',
+        local_dw_ks:int=5,
+        mlp_ratio:float=4.,
+        drop_path:float=0.,
+        norm_layer=LayerNorm2d,
+        cpe_ks:int=0, # if > 0, the kernel size of the conv pos embedding
+        mlp_dw:bool=False,
+        layerscale=-1,
+        use_slot_attention:bool=True,
+        ) -> None:
+
+        super().__init__()
+        self.embed_dim = embed_dim
+        slot_scale = slot_scale or embed_dim ** (-0.5)
+        self.scale_mode = scale_mode
+        self.use_slot_attention = use_slot_attention
+        assert scale_mode in {'learnable', 'const'}
+        if scale_mode  == 'learnable':
+            self.slot_scale = nn.Parameter(torch.tensor(slot_scale))
+        else: # const
+            self.register_buffer('slot_scale', torch.tensor(slot_scale))
+
+        # convolutional position encoding
+        self.with_conv_pos_emb = (cpe_ks > 0)
+        if self.with_conv_pos_emb:
+            self.pos_conv = nn.Conv2d(
+                embed_dim, embed_dim,
+                kernel_size=cpe_ks,
+                padding=cpe_ks//2, groups=embed_dim)
+
+        # slot initialization
+        assert slot_init in {'param', 'ada_avgpool','ada_maxpool'}
+        self.slot_init = slot_init
+        if self.slot_init == 'param':
+            self.init_slots = nn.Parameter(
+                torch.empty(1, num_slots, embed_dim), True)
+            torch.nn.init.normal_(self.init_slots, std=.02)
+        else:
+            self.pool_size = math.isqrt(num_slots)
+            # TODO: relax the square number constraint
+            assert self.pool_size**2 == num_slots
+        
+        # spatial mixing
+        self.norm1 = norm_layer(embed_dim//2)
+        self.relation_mha = nn.MultiheadAttention(
+            embed_dim=embed_dim//2,
+            num_heads=num_heads//2,
+            batch_first=True) if use_slot_attention else nn.Identity()
+        # per-location embedding
+        self.norm2 = norm_layer(embed_dim)
+        self.mlp =FRFN(embed_dim,embed_dim*2)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ligmlp=nn.Linear(embed_dim//2,embed_dim)
+        # layer scale
+        self.ls1 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.ls2 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.vis_proxy = nn.Identity()
+        self.Channel_attn=IG_MSA(embed_dim,dim_head=embed_dim)
+
+    def _forward_relation(self, x:torch.Tensor, init_slots:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        x_flatten = x.permute(0, 2, 3, 1).flatten(1, 2)
+        logits = F.normalize(init_slots, p=2, dim=-1) @ \
+            (self.slot_scale*F.normalize(x_flatten, p=2, dim=-1).transpose(-1, -2)) # (bs, num_slots, l)
+        # soft grouping
+        slots = torch.softmax(logits, dim=-1) @ x_flatten # (bs, num_slots, c)
+        # cluster update with mha
+        slots, attn_weights = self.relation_mha(query=slots, key=slots, value=slots, need_weights=False)
+
+        if not self.training: # hack, for visualization
+            logits, attn_weights = self.vis_proxy((logits, attn_weights))
+
+        # soft ungrouping
+        out = torch.softmax(logits.transpose(-1, -2), dim=-1) @ slots # (bs, h*w, c)
+        #out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        # # fuse with locally enhanced features
+        out=self.ligmlp(out)
+        out = out.permute(0, 2, 1) # (b, c, h, w)
+        return out, slots
+
+    def forward(self, x:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        b,c,h,w=x.shape
+        copy=x
+        light,color=x.chunk(2,dim=1)
+        if self.slot_init == 'ada_avgpool':
+            light_slots = F.adaptive_avg_pool2d(light, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        elif self.slot_init == 'ada_maxpool':
+            light_slots = F.adaptive_max_pool2d(light, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        else:
+            init_slots = self.init_slots
+        # print(x.dtype, init_slots.dtype) -> float16 float32
+        if self.with_conv_pos_emb:
+            x = x + self.pos_conv(x)
+
+        shortcut = x
+        light_y, updt_slots = self._forward_relation(self.norm1(light), light_slots)
+        #ipdb.set_trace()
+        x=x+self.Channel_attn(x,light_y.reshape_as(x))
+        x = shortcut + self.drop_path(self.ls1(x))
+        x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
+
+        return x,copy-x
+    
+class RetinxGLMixBlockMHA(nn.Module):
+    """
+    multihead attention with soft grouping + MLP
+    """
+    def __init__(self,
+        embed_dim:int,
+        num_heads:int,
+        num_slots:int=64,
+        slot_init:str='ada_avgpool',
+        slot_scale:float=None,
+        scale_mode='learnable',
+        local_dw_ks:int=5,
+        mlp_ratio:float=4.,
+        drop_path:float=0.,
+        norm_layer=LayerNorm2d,
+        cpe_ks:int=0, # if > 0, the kernel size of the conv pos embedding
+        mlp_dw:bool=False,
+        layerscale=-1,
+        use_slot_attention:bool=True,
+        ) -> None:
+
+        super().__init__()
+        self.embed_dim = embed_dim
+        slot_scale = slot_scale or embed_dim ** (-0.5)
+        self.scale_mode = scale_mode
+        self.use_slot_attention = use_slot_attention
+        assert scale_mode in {'learnable', 'const'}
+        if scale_mode  == 'learnable':
+            self.slot_scale = nn.Parameter(torch.tensor(slot_scale))
+        else: # const
+            self.register_buffer('slot_scale', torch.tensor(slot_scale))
+
+        # convolutional position encoding
+        self.with_conv_pos_emb = (cpe_ks > 0)
+        if self.with_conv_pos_emb:
+            self.pos_conv = nn.Conv2d(
+                embed_dim, embed_dim,
+                kernel_size=cpe_ks,
+                padding=cpe_ks//2, groups=embed_dim)
+
+        # slot initialization
+        assert slot_init in {'param', 'ada_avgpool','ada_maxpool'}
+        self.slot_init = slot_init
+        if self.slot_init == 'param':
+            self.init_slots = nn.Parameter(
+                torch.empty(1, num_slots, embed_dim), True)
+            torch.nn.init.normal_(self.init_slots, std=.02)
+        else:
+            self.pool_size = math.isqrt(num_slots)
+            # TODO: relax the square number constraint
+            assert self.pool_size**2 == num_slots
+        
+        # spatial mixing
+        self.norm1 = norm_layer(embed_dim//2)
+        self.relation_mha = nn.MultiheadAttention(
+            embed_dim=embed_dim//2,
+            num_heads=num_heads//2,
+            batch_first=True) if use_slot_attention else nn.Identity()
+        # per-location embedding
+        self.norm2 = norm_layer(embed_dim)
+        self.mlp =FRFN(embed_dim,embed_dim*2)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # layer scale
+        self.ls1 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.ls2 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.vis_proxy = nn.Identity()
+        self.mha=MHSA_NCHW_Block(
+                    embed_dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    drop_path=drop_path,
+                    cpe_ks=cpe_ks,
+                    mlp_dw=mlp_dw,
+                    layerscale=layerscale
+)
+        
+    def _forward_relation(self, x:torch.Tensor, init_slots:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        x_flatten = x.permute(0, 2, 3, 1).flatten(1, 2)
+        logits = F.normalize(init_slots, p=2, dim=-1) @ \
+            (self.slot_scale*F.normalize(x_flatten, p=2, dim=-1).transpose(-1, -2)) # (bs, num_slots, l)
+        # soft grouping
+        slots = torch.softmax(logits, dim=-1) @ x_flatten # (bs, num_slots, c)
+        # cluster update with mha
+        slots, attn_weights = self.relation_mha(query=slots, key=slots, value=slots, need_weights=False)
+
+        if not self.training: # hack, for visualization
+            logits, attn_weights = self.vis_proxy((logits, attn_weights))
+
+        # soft ungrouping
+        out = torch.softmax(logits.transpose(-1, -2), dim=-1) @ slots # (bs, h*w, c)
+        #out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        # # fuse with locally enhanced features
+
+        out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        return out, slots
+
+    def forward(self, x:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        b,c,h,w=x.shape
+        copy=x
+        light,color=x.chunk(2,dim=1)
+        if self.slot_init == 'ada_avgpool':
+            light_slots = F.adaptive_avg_pool2d(light, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+            color_slots= F.adaptive_avg_pool2d(color, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        elif self.slot_init == 'ada_maxpool':
+            light_slots = F.adaptive_max_pool2d(light, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+            color_slots= F.adaptive_max_pool2d(color, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        else:
+            init_slots = self.init_slots
+        # print(x.dtype, init_slots.dtype) -> float16 float32
+        if self.with_conv_pos_emb:
+            x = x + self.pos_conv(x)
+
+        shortcut = x
+        y,c=x.chunk(2,dim=1)
+        y, updt_slots = self._forward_relation(self.norm1(y), light_slots)
+        c, updt_slots = self._forward_relation(self.norm1(c), color_slots)
+        x= torch.cat([y,c],dim=1)
+        x = shortcut + self.drop_path(self.ls1(x))
+        x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
+        x=self.mha(x)
+        return x,copy-x
+
+class ColorBlock(nn.Module):
+    """
+    multihead attention with soft grouping + MLP
+    """
+    def __init__(self,
+        embed_dim:int,
+        num_heads:int=1,
+        num_slots:int=64,
+        slot_init:str='ada_avgpool',
+        slot_scale:float=None,
+        scale_mode='learnable',
+        local_dw_ks:int=5,
+        mlp_ratio:float=4.,
+        drop_path:float=0.,
+        norm_layer=LayerNorm2d,
+        cpe_ks:int=0, # if > 0, the kernel size of the conv pos embedding
+        mlp_dw:bool=False,
+        layerscale=-1,
+        use_slot_attention:bool=True,
+        ) -> None:
+
+        super().__init__()
+        self.embed_dim = embed_dim
+        slot_scale = slot_scale or embed_dim ** (-0.5)
+        self.scale_mode = scale_mode
+        self.use_slot_attention = use_slot_attention
+        assert scale_mode in {'learnable', 'const'}
+        if scale_mode  == 'learnable':
+            self.slot_scale = nn.Parameter(torch.tensor(slot_scale))
+            self.color_slot_scale = nn.Parameter(torch.tensor(slot_scale))
+        else: # const
+            self.register_buffer('slot_scale', torch.tensor(slot_scale))
+
+        # convolutional position encoding
+        self.with_conv_pos_emb = (cpe_ks > 0)
+        if self.with_conv_pos_emb:
+            self.pos_conv = nn.Conv2d(
+                embed_dim, embed_dim,
+                kernel_size=cpe_ks,
+                padding=cpe_ks//2, groups=embed_dim)
+
+        # slot initialization
+        assert slot_init in {'param', 'ada_avgpool','ada_maxpool'}
+        self.slot_init = slot_init
+        if self.slot_init == 'param':
+            self.init_slots = nn.Parameter(
+                torch.empty(1, num_slots, embed_dim), True)
+            torch.nn.init.normal_(self.init_slots, std=.02)
+        else:
+            self.pool_size = math.isqrt(num_slots)
+            # TODO: relax the square number constraint
+            assert self.pool_size**2 == num_slots
+        
+        # spatial mixing
+        self.norm1 = norm_layer(embed_dim)
+        self.relation_mha = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            batch_first=True) if use_slot_attention else nn.Identity()
+        self.relation_mha_color = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            batch_first=True) if use_slot_attention else nn.Identity()
+        # per-location embedding
+        self.norm2 = norm_layer(embed_dim)
+        self.mlp =FRFN(embed_dim,embed_dim*2)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # layer scale
+        self.ls1 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.ls2 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.vis_proxy = nn.Identity()
+        self.color=nn.Parameter(torch.rand((1, 64, embed_dim))-0.5, requires_grad=True)
+        
+    def _forward_relation(self, x:torch.Tensor, init_slots:torch.Tensor,color:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        #ipdb.set_trace()
+        x_flatten = x.permute(0, 2, 3, 1).flatten(1, 2)
+        color_logits = F.normalize(color, p=2, dim=-1) @ \
+            (self.color_slot_scale*F.normalize(init_slots, p=2, dim=-1).transpose(-1, -2)) # (bs, num_slots, l)
+        # cluster update with mha
+        color_slots = torch.softmax(color_logits, dim=-1) @ init_slots
+        color_slots, attn_weights = self.relation_mha_color(query=color_slots, key=color_slots, value=color_slots, need_weights=False)
+        
+        init_slots = torch.softmax(color_logits.transpose(-1, -2), dim=-1) @ color_slots # (bs, h*w, c)
+
+
+        logits = F.normalize(init_slots, p=2, dim=-1) @ \
+            (self.slot_scale*F.normalize(x_flatten, p=2, dim=-1).transpose(-1, -2)) # (bs, num_slots, l)
+        
+        # soft grouping
+        slots = torch.softmax(logits, dim=-1) @ x_flatten # (bs, num_slots, c)
+
+        slots, attn_weights = self.relation_mha(query=slots, key=slots, value=slots, need_weights=False)
+        if not self.training: # hack, for visualization
+            logits, attn_weights = self.vis_proxy((logits, attn_weights))
+        # soft ungrouping
+        out = torch.softmax(logits.transpose(-1, -2), dim=-1) @ slots # (bs, h*w, c)
+        #out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        # # fuse with locally enhanced features
+
+        out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        return out, slots
+
+    def forward(self, x:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        B,C,H,W=x.shape
+        color = self.color.expand(B, -1, -1)
+        slots = F.adaptive_avg_pool2d(x, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        # print(x.dtype, init_slots.dtype) -> float16 float32
+        if self.with_conv_pos_emb:
+            x = x + self.pos_conv(x)
+
+        shortcut = x
+        x, updt_slots = self._forward_relation(self.norm1(x), slots,color)
+        x = shortcut + self.drop_path(self.ls1(x))
+        x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
+        return x
+
+    def extra_repr(self) -> str:
+        return f"scale_mode={self.scale_mode}, "\
+               f"slot_init={self.slot_init}, "\
+               f"use_slot_attention={self.use_slot_attention}"
+
+
+
+class FRFN(nn.Module):
+    def __init__(self, dim=32, hidden_dim=128, act_layer=nn.GELU,drop = 0., use_eca=False):
+        super().__init__()
+        self.linear1 = nn.Sequential(
+            nn.Linear(dim, hidden_dim*2),
+            act_layer())
+        self.dwconv = nn.Sequential(
+            nn.Conv2d(hidden_dim,hidden_dim,groups=hidden_dim,kernel_size=3,stride=1,padding=1),
+                        act_layer())
+        self.linear2 = nn.Sequential(nn.Linear(hidden_dim, dim))
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+
+        self.dim_conv = self.dim // 4
+        self.dim_untouched = self.dim - self.dim_conv 
+        self.partial_conv3 = nn.Conv2d(self.dim_conv, self.dim_conv, 3, 1, 1, bias=False)
+
+    def forward(self, x):
+        # bs x hw x c
+        bs, c, h,w = x.size()
+
+        x1, x2,= torch.split(x, [self.dim_conv,self.dim_untouched], dim=1)
+        x1 = self.partial_conv3(x1)
+        x = torch.cat((x1, x2), 1)
+
+        # flaten
+        x = rearrange(x, ' b c h w -> b (h w) c', h = h, w = w)
+
+        x = self.linear1(x)
+        #gate mechanism
+        x_1,x_2 = x.chunk(2,dim=-1)
+
+        x_1 = rearrange(x_1, ' b (h w) (c) -> b c h w ', h = h, w = w)
+        x_1 = self.dwconv(x_1)
+        x_1 = rearrange(x_1, ' b c h w -> b (h w) c', h = h, w = w)
+        x = x_1 * x_2
+        
+        x = self.linear2(x)
+        x =rearrange(x, ' b (h w) (c) -> b c h w ', h = h, w = w)
+        return x
+
+
+class myGLMixBlockMHA(nn.Module):
+    """
+    multihead attention with soft grouping + MLP
+    """
+    def __init__(self,
+        embed_dim:int,
+        num_heads:int,
+        num_slots:int=64,
+        slot_init:str='ada_avgpool',
+        slot_scale:float=None,
+        scale_mode='learnable',
+        local_dw_ks:int=5,
+        mlp_ratio:float=4.,
+        drop_path:float=0.,
+        norm_layer=LayerNorm2d,
+        cpe_ks:int=0, # if > 0, the kernel size of the conv pos embedding
+        mlp_dw:bool=False,
+        layerscale=-1,
+        use_slot_attention:bool=True,
+        ) -> None:
+
+        super().__init__()
+        self.embed_dim = embed_dim
+        slot_scale = slot_scale or embed_dim ** (-0.5)
+        self.scale_mode = scale_mode
+        self.use_slot_attention = use_slot_attention
+        assert scale_mode in {'learnable', 'const'}
+        if scale_mode  == 'learnable':
+            self.slot_scale = nn.Parameter(torch.tensor(slot_scale))
+        else: # const
+            self.register_buffer('slot_scale', torch.tensor(slot_scale))
+
+        # convolutional position encoding
+        self.with_conv_pos_emb = (cpe_ks > 0)
+        if self.with_conv_pos_emb:
+            self.pos_conv = nn.Conv2d(
+                embed_dim, embed_dim,
+                kernel_size=cpe_ks,
+                padding=cpe_ks//2, groups=embed_dim)
+
+        # slot initialization
+        assert slot_init in {'param', 'ada_avgpool','ada_maxpool'}
+        self.slot_init = slot_init
+        if self.slot_init == 'param':
+            self.init_slots = nn.Parameter(
+                torch.empty(1, num_slots, embed_dim), True)
+            torch.nn.init.normal_(self.init_slots, std=.02)
+        else:
+            self.pool_size = math.isqrt(num_slots)
+            # TODO: relax the square number constraint
+            assert self.pool_size**2 == num_slots
+        
+        # spatial mixing
+        self.norm1 = norm_layer(embed_dim)
+        self.relation_mha = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            batch_first=True) if use_slot_attention else nn.Identity()
+
+        
+        # per-location embedding
+        self.norm2 = norm_layer(embed_dim)
+        self.mlp = FRFN(embed_dim,embed_dim*2)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # layer scale
+        self.ls1 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        self.ls2 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nchw') \
+            if layerscale > 0 else nn.Identity()
+        # NOTE: hack, for visualization with forward hook
+        self.vis_proxy = nn.Identity()
+        self.mha=MHSA_NCHW_Block(
+                    embed_dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    drop_path=drop_path,
+                    cpe_ks=cpe_ks,
+                    mlp_dw=mlp_dw,
+                    layerscale=layerscale
+        )
+        self.mask_token=nn.Parameter(torch.zeros(1, 1, embed_dim))
+    def random_masking(self, x, mask_ratio=0.1):
+        """
+        Perform per-sample random masking by per-sample shuffling.
+        Per-sample shuffling is done by argsort random noise.
+        x: [N, L, D], sequence
+        """
+        N, L, D = x.shape  # batch, length, dim
+        len_keep = int(L * (1 - mask_ratio))
+        
+        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        
+        # sort noise for each sample
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+        return x_masked, mask, ids_restore
+    
+    def _forward_relation(self, x:torch.Tensor, init_slots:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        x_flatten = x.permute(0, 2, 3, 1).flatten(1, 2)
+        #x_flatten,mask, ids_restore=self.random_masking(x_unmask)
+        logits = F.normalize(init_slots, p=2, dim=-1) @ \
+            (self.slot_scale*F.normalize(x_flatten, p=2, dim=-1).transpose(-1, -2)) # (bs, num_slots, l)
+        # soft grouping
+        slots = torch.softmax(logits, dim=-1) @ x_flatten # (bs, num_slots, c)
+        # cluster update with mha
+        slots, attn_weights = self.relation_mha(query=slots, key=slots, value=slots, need_weights=False)
+
+        if not self.training: # hack, for visualization
+            logits, attn_weights = self.vis_proxy((logits, attn_weights))
+
+        # soft ungrouping
+        out = torch.softmax(logits.transpose(-1, -2), dim=-1) @ slots # (bs, h*w, c)
+        #out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        # # fuse with locally enhanced features
+        #mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x_flatten.shape[1], 1)
+        #mask_tokens = torch.zeros(x.shape[0], ids_restore.shape[1] - x_flatten.shape[1], x_unmask.shape[2]).to(x_mask.device)
+        #out = torch.cat([out, mask_tokens], dim=1)
+        #out = torch.gather(out, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x_unmask.shape[2]))  # unshuffle
+        #out=x_mask+out
+        out = out.permute(0, 2, 1).reshape_as(x) # (b, c, h, w)
+        return out, slots
+
+    def forward(self, x:torch.Tensor):
+        """
+        x: (bs, c, h, w) tensor
+        init_slots: (bs, num_slots, c) tensor
+        """
+        copy=x
+        if self.slot_init == 'ada_avgpool':
+            init_slots = F.adaptive_avg_pool2d(x, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        elif self.slot_init == 'ada_maxpool':
+            init_slots = F.adaptive_max_pool2d(x, output_size=self.pool_size
+                ).permute(0, 2, 3, 1).flatten(1, 2)
+        else:
+            init_slots = self.init_slots
+
+        # print(x.dtype, init_slots.dtype) -> float16 float32
+        if self.with_conv_pos_emb:
+            x = x + self.pos_conv(x)
+
+        shortcut = x
+        x, updt_slots = self._forward_relation(self.norm1(x), init_slots)
+        x = shortcut + self.drop_path(self.ls1(x))
+        x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
+        x= self.mha(x)
+        return x,copy-x#self.enlarger(copy-x)
+    
+    def extra_repr(self) -> str:
+        return f"scale_mode={self.scale_mode}, "\
+               f"slot_init={self.slot_init}, "\
+               f"use_slot_attention={self.use_slot_attention}"
+        
+
+
+
 
 class myGLMix(nn.Module):
     """
@@ -392,7 +1157,7 @@ class myGLMix(nn.Module):
         self.depth = depth
         self.mixing_mode = mixing_mode
         self.blocks = nn.ModuleList([
-                        myGLMixBlock(
+                        RetinxGLMixBlock(
                             embed_dim=dim,
                             num_heads=num_heads,
                             num_slots=num_slots,
@@ -405,22 +1170,12 @@ class myGLMix(nn.Module):
                             mlp_dw=mlp_dw,
                             layerscale=layerscale
                         )for i in range(depth)])
-        self.local=nn.ModuleList([(
-                        DEBlock(dim)
-                        )for i in range(depth)])
         self.merger = nn.Sequential(
-            nn.Conv2d(dim*5,dim,kernel_size=1),
+            nn.Conv2d(dim*3,dim,kernel_size=1),
             nn.GELU(),
             nn.Conv2d(dim,dim,kernel_size=1),
-            LayerNorm2d(dim)
         )
-        self.merger2 = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads,
-            batch_first=True)
-        self.merger3 = nn.Sequential(
-            nn.Conv2d(dim,dim*2,kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(dim*2,dim,kernel_size=1),
-        )
+        self.local=DEBlock(dim)
     def forward(self, x:torch.Tensor):
         """
         Args:
@@ -428,19 +1183,135 @@ class myGLMix(nn.Module):
         Return:
             NCHW tensor
         """
-        m1,x1 = self.blocks[0](x)
-        m1,x2 = self.blocks[1](m1)
-        m1,x3 = self.blocks[2](m1)
-        x0,x4 = self.blocks[3](m1)
-        x1=self.local[0](x1)+x1
-        x2=self.local[1](x2)+x2
-        x3=self.local[2](x3)+x3
-        x4=self.local[3](x4)+x4
-        m1=self.merger(torch.cat([x0,x1,x2,x3,x4],dim=1)).permute(0, 2, 3, 1).flatten(1, 2)
-        m2,_=self.merger2(query=m1, key=m1, value=m1, need_weights=False)
-        #ipdb.set_trace()
-        m2=m2.permute(0, 2, 1).reshape_as(x)
-        return x0+self.merger3(m2)
+        x,x1 = self.blocks[0](x)
+        x,x2 = self.blocks[1](x)
+        x1=self.local(x1)
+        x2=self.local(x2)
+        return x+self.merger(torch.cat([x,x1,x2],dim=1))
+
+class myGLMixMHA(nn.Module):
+    """
+    multihead attention with soft grouping + MLP
+    """
+    def __init__(self, 
+        dim, num_heads, depth:int,
+        mlp_ratio=4., drop_path=0.,
+        ################
+        mixing_mode='glmix', # {'mha',  'sgmha', 'dw', 'glmix'}
+        local_dw_ks=5, # kernel size of dw conv, for 'dw' and 'glmix'
+        slot_init:str='ada_avgpool', # {'param', 'conv', 'pool', 'ada_avgpool'}
+        num_slots:int=64, # to control number of slots
+        use_slot_attention:bool=True,
+        cpe_ks:int=0,
+        mlp_dw:bool=False,
+        ##############
+        layerscale=-1
+        ):
+        super().__init__()
+        self.dim = dim
+        self.depth = depth
+        self.mixing_mode = mixing_mode
+        self.blocks = nn.ModuleList([
+                        RetinxGLMixBlockMHA(
+                            embed_dim=dim,
+                            num_heads=num_heads,
+                            num_slots=num_slots,
+                            slot_init=slot_init,
+                            local_dw_ks=local_dw_ks,
+                            use_slot_attention=use_slot_attention,
+                            mlp_ratio=mlp_ratio,
+                            drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                            cpe_ks=cpe_ks,
+                            mlp_dw=mlp_dw,
+                            layerscale=layerscale
+                        )
+                        for i in range(depth)])
+    
+    def forward(self,x:torch.Tensor):
+        """
+        Args:
+            x: NCHW tensor
+        Return:
+            NCHW tensor
+        """
+        x0,x1 = self.blocks[0](x)
+        return x0
+
+class myGLMixMHAlocal(nn.Module):
+    """
+    multihead attention with soft grouping + MLP
+    """
+    def __init__(self, 
+        dim, num_heads, depth:int,
+        mlp_ratio=4., drop_path=0.,
+        ################
+        mixing_mode='glmix', # {'mha',  'sgmha', 'dw', 'glmix'}
+        local_dw_ks=5, # kernel size of dw conv, for 'dw' and 'glmix'
+        slot_init:str='ada_avgpool', # {'param', 'conv', 'pool', 'ada_avgpool'}
+        num_slots:int=64, # to control number of slots
+        use_slot_attention:bool=True,
+        cpe_ks:int=0,
+        mlp_dw:bool=False,
+        ##############
+        layerscale=-1
+        ):
+        super().__init__()
+        self.dim = dim
+        self.depth = depth
+        self.mixing_mode = mixing_mode
+        self.blocks = nn.ModuleList([
+                        myGLMixBlockMHA(
+                            embed_dim=dim,
+                            num_heads=num_heads,
+                            num_slots=num_slots,
+                            slot_init=slot_init,
+                            local_dw_ks=local_dw_ks,
+                            use_slot_attention=use_slot_attention,
+                            mlp_ratio=mlp_ratio,
+                            drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                            cpe_ks=cpe_ks,
+                            mlp_dw=mlp_dw,
+                            layerscale=layerscale
+                        )
+                        for i in range(depth)])
+        self.merger = nn.Sequential(
+            nn.Conv2d(dim*2,dim,kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(dim,dim,kernel_size=1)
+        )
+        self.local=nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, dilation=1, groups=dim),
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=2, dilation=2, groups=dim),
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=3, dilation=3, groups=dim),
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, dilation=1, groups=dim),
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, kernel_size=1, stride=1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+        )
+    def forward(self,x:torch.Tensor):
+        """
+        Args:
+            x: NCHW tensor
+        Return:
+            NCHW tensor
+        """
+        x0,x1 = self.blocks[0](x)
+        x1=self.local(x1)+x1
+
+        return x0+self.merger(torch.cat([x0,x1],dim=1))
+
 
 class MHSA_NCHW_Block(nn.Module):
     def __init__(self, embed_dim:int, num_heads:int, dropout=0.,
@@ -460,11 +1331,7 @@ class MHSA_NCHW_Block(nn.Module):
         self.mha_op = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads,
             batch_first=True, dropout=dropout)
         self.norm2 = norm_layer(embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Conv2d(embed_dim, int(mlp_ratio*embed_dim), kernel_size=1),
-            ResDWConvNCHW(int(mlp_ratio*embed_dim),ks=3) if mlp_dw else nn.Identity(),
-            nn.GELU(),
-            nn.Conv2d(int(mlp_ratio*embed_dim), embed_dim, kernel_size=1))
+        self.mlp = FRFN(embed_dim,embed_dim*2)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         self.ls1 = LayerScale(chans=embed_dim, init_value=layerscale, in_format='nlc') if layerscale > 0 else nn.Identity()
@@ -638,7 +1505,29 @@ class NonOverlappedPatchEmbeddings(nn.ModuleList):
             modules.append(transition)
         super().__init__(modules)
 
+class SEBlock(nn.Module):
+    def __init__(self, input_channels, reduction_ratio=16):
+        super(SEBlock, self).__init__()
+        self.conv=nn.Conv2d(input_channels,input_channels, kernel_size=5, padding=2, groups=input_channels)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Linear(input_channels, input_channels // reduction_ratio)
+        self.fc2 = nn.Linear(input_channels // reduction_ratio, input_channels)
+        self._init_weights()
 
+    def forward(self, x):
+        batch_size, num_channels, _, _ = x.size()
+        x=self.conv(x)
+        y = self.pool(x).reshape(batch_size, num_channels)
+        y = F.relu(self.fc1(y))
+        y = torch.tanh(self.fc2(y))
+        y = y.reshape(batch_size, num_channels, 1, 1)
+        return x * y
+    
+    def _init_weights(self):
+        torch.nn.init.kaiming_uniform_(self.fc1.weight, a=0, mode='fan_in', nonlinearity='relu')
+        torch.nn.init.kaiming_uniform_(self.fc2.weight, a=0, mode='fan_in', nonlinearity='relu')
+        torch.nn.init.constant_(self.fc1.bias, 0)
+        torch.nn.init.constant_(self.fc2.bias, 0)
 
 class OverlappedPacthEmbeddings(nn.ModuleList):
     def __init__(self, embed_dims:Iterable[int],
@@ -656,7 +1545,8 @@ class OverlappedPacthEmbeddings(nn.ModuleList):
                 norm_layer(embed_dims[0] // 2),
                 nn.GELU(),
                 nn.Conv2d(embed_dims[0] // 2, embed_dims[0], kernel_size=3, stride=2, padding=1),
-                norm_layer(embed_dims[0])
+                norm_layer(embed_dims[0]),
+                KANBlock(embed_dims[0])
             )
         else:
             stem = nn.Sequential(
@@ -665,7 +1555,7 @@ class OverlappedPacthEmbeddings(nn.ModuleList):
                 norm_layer(embed_dims[0] // 2),
             )
         modules = [stem]
-        for i in range(3):
+        for i in range(1):
             if midd_order == 'norm.proj':
                 transition = nn.Sequential(
                     norm_layer(embed_dims[i]), 
@@ -681,7 +1571,7 @@ class OverlappedPacthEmbeddings(nn.ModuleList):
 
 class ContinusParalleConv(nn.Module):
     # 一个连续的卷积模块，包含BatchNorm 在前 和 在后 两种模式
-    def __init__(self, in_channels, out_channels, pre_Batch_Norm=True):
+    def __init__(self, in_channels, out_channels):
         super(ContinusParalleConv, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -805,7 +1695,7 @@ class Final_pixel_shuffle2D(nn.Module):
         x=F.pixel_shuffle(x, upscale_factor=2)
         x=self.conv(x)
         return x
-class Final_pixel_shuffle2DYCBCR(nn.Module):
+class Final_pixel_shuffle2Dycbcr(nn.Module):
     def __init__(self, dim,norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim  # 96
@@ -813,8 +1703,9 @@ class Final_pixel_shuffle2DYCBCR(nn.Module):
         self.expandc = nn.Linear(self.dim//2, 2 * self.dim, bias=False)
         self.normc = nn.LayerNorm(2 * self.dim)
         self.normy = nn.LayerNorm(2 * self.dim)
-        self.convc= nn.Conv2d(self.dim//2, 2, 1)
-        self.convy= nn.Conv2d(self.dim//2, 1, 1)
+        self.Lconv=nn.Conv2d(dim//2,1,1)
+        self.Cconv=nn.Conv2d(dim//2,2,1)
+        
         self._ycbcr_to_rgb=YUVtoRGB()
     def forward(self, x):
         #ipdb.set_trace()
@@ -826,8 +1717,8 @@ class Final_pixel_shuffle2DYCBCR(nn.Module):
         y=y.permute(0,3,1,2)
         y=F.pixel_shuffle(y, upscale_factor=2)
         c=F.pixel_shuffle(c, upscale_factor=2)
-        c=self.convc(c)
-        y=self.convy(y)
+        c=self.Cconv(c)
+        y=self.Lconv(y)
         return self._ycbcr_to_rgb(torch.cat([y,c],dim=1))
 class myFinal_pixel_shuffle2Dycbcr(nn.Module):
     def __init__(self, dim,norm_layer=nn.LayerNorm):
@@ -838,7 +1729,9 @@ class myFinal_pixel_shuffle2Dycbcr(nn.Module):
         self.normc = nn.LayerNorm(2 * self.dim)
         self.normy = nn.LayerNorm(2 * self.dim)
         #self.conv= myGLMix(dim,4,5,slot_init='ada_maxpool')
-        self.conv=nn.Conv2d(dim,dim,1)
+        self.Lconv=SEBlock(dim//2)
+        self.Cconv=nn.Conv2d(dim//2,dim//2,1)
+        
     def forward(self, x):
         x=x.permute(0,2,3,1)
         y,c=x.chunk(2,dim=-1)
@@ -848,9 +1741,10 @@ class myFinal_pixel_shuffle2Dycbcr(nn.Module):
         y=y.permute(0,3,1,2)
         y=F.pixel_shuffle(y, upscale_factor=2)
         c=F.pixel_shuffle(c, upscale_factor=2)
+        y=y*self.Lconv(y)
+        c=c+self.Cconv(c)
         x=torch.cat([y,c],dim=1)
-        x=self.conv(x)
-        #ipdb.set_trace()
+
         return x
 
 class myFinal_pixel_shuffle2D(nn.Module):
@@ -910,23 +1804,23 @@ class PatchMerging2D(nn.Module):
         x = self.reduction(x)
 
         return x
-class GLNet(nn.Module):
+class GLNetBEST(nn.Module):
     """
     vision transformer with soft grouping
     """
     def __init__(self,
         in_chans=3,
         num_classes=3,
-        depth=[2, 2, 6, 2],
-        embed_dim=[96, 192, 384, 768],
-        head_dim=32, qk_scale=None,
+        depth=[4, 8, 8, 4],
+        embed_dim=[96, 192, 192, 96],
+        head_dim=16, qk_scale=None,
         drop_path_rate=0., drop_rate=0.,
         use_checkpoint_stages=[],
         mlp_ratios=[4, 4, 4, 4],
-        norm_layer=LayerNorm2d,
+        norm_layer=nn.BatchNorm2d,
         pre_head_norm_layer=None,
         ######## glnet specific ############
-        mixing_modes=('glmix', 'glmix', 'glmix', 'mha'), # {'mha', 'glmix',  'glmix.mha_nchw', 'mha_nchw'}
+        mixing_modes=('glmix', 'glmix.mha_nchw', 'glmix.mha_nchw', 'glmix'), # {'mha', 'glmix',  'glmix.mha_nchw', 'mha_nchw'}
         local_dw_ks=5, # kernel size of dw conv
         slot_init:str='param', #{'param', 'conv', 'pool', 'ada_pool'}
         num_slots:int=64, # to control number of slots
@@ -1020,7 +1914,7 @@ class GLNet(nn.Module):
         self.norm = pre_head_norm(embed_dim[-1])
         # Classifier head
         self.pool = nn.MaxPool2d(2)
-        self.final_up = Final_pixel_shuffle2DYCBCR(dim=embed_dim[-1], norm_layer=norm_layer)
+        self.final_up = Final_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
         self.final_up_before = myFinal_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
         self.resconv=nn.Conv2d(3,3,1)
         self.scale=nn.Parameter(torch.ones(1))
@@ -1076,7 +1970,145 @@ class GLNet(nn.Module):
         x=self.final_up_before(x)
         x = self.final_up(x)+self.scale*y
         x=self.resconv(x)
-        # out=3 24 256 256
+        return x
+
+    def forward(self, y:torch.Tensor):
+        ycbcr=self._rgb_to_ycbcr(y)
+        x, skip_list = self.forward_features(ycbcr)
+        x = self.forward_features_up(x, skip_list)
+        x = self.forward_final(x,y)
+        return x
+
+class GLNet(nn.Module):
+    """
+    vision transformer with soft grouping
+    """
+    def __init__(self,
+        in_chans=3,
+        num_classes=3,
+        depth=[2, 3, 3, 2],
+        embed_dim=[96, 192, 192, 96],
+        head_dim=16, qk_scale=None,
+        drop_path_rate=0., drop_rate=0.,
+        use_checkpoint_stages=[],
+        mlp_ratios=[4, 4, 4, 4],
+        norm_layer=nn.BatchNorm2d,
+        pre_head_norm_layer=None,
+        ######## glnet specific ############
+        mixing_modes=('glmix', 'glmix.mha_nchw', 'glmix.mha_nchw', 'glmix'), # {'mha', 'glmix',  'glmix.mha_nchw', 'mha_nchw'}
+        local_dw_ks=5, # kernel size of dw conv
+        slot_init:str='param', #{'param', 'conv', 'pool', 'ada_pool'}
+        num_slots:int=64, # to control number of slots
+        cpe_ks:int=0,
+        #######################################
+        downsample_style:str='non_ovlp', # {'non_ovlp', 'ovlp'}
+        transition_layout:str='proj.norm', # {'norm.proj', 'proj.norm'}
+        dual_patch_norm:bool=False,
+        mlp_dw:bool=False,
+        layerscale:float=-1.,
+        ###################
+        **unused_kwargs
+        ):
+        super().__init__()
+        print(f"unused_kwargs in model initilization: {unused_kwargs}.")
+
+        self.num_classes = num_classes
+        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+
+        ############ downsample layers (patch embeddings) ######################
+        assert downsample_style in {'non_ovlp', 'ovlp'}
+        self.downsample_layers = OverlappedPacthEmbeddings(
+                embed_dims=embed_dim, in_chans=in_chans, norm_layer=norm_layer,
+                midd_order=transition_layout,
+                dual_patch_norm=dual_patch_norm)
+        ##########################################################################
+        self.stages = nn.ModuleList() # 4 feature resolution stages, each consisting of multiple residual blocks
+        self.up = nn.ModuleList()
+        nheads= [dim // head_dim for dim in embed_dim]
+        dp_rates=[x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
+        local_dw_ks = [local_dw_ks,]*4 if isinstance(local_dw_ks, int) else local_dw_ks
+        self.conv_uplayer = ResidualUpSample(embed_dim[1])
+        self.downsample_convlayer = ContinusParalleConv(embed_dim[0],embed_dim[1])
+        for i in range(2):
+            if i ==0:
+                stage=myGLMix(embed_dim[i],nheads[i],2,slot_init='ada_maxpool')
+            else:
+                stage=myGLMixMHA(embed_dim[i],nheads[i],1,slot_init='ada_maxpool')
+            self.stages.append(stage)
+        for i in range(2,3):
+            upsample=PatchExpand2D(embed_dim[i])
+            self.up.append(upsample)
+        for i in range(2,4):
+            if i ==3:
+                stage=myGLMix(embed_dim[i],nheads[i],2,slot_init='ada_avgpool')
+            else:
+                stage = myGLMixMHA(embed_dim[i],nheads[i],1,slot_init='ada_avgpool')
+            self.stages.append(stage)
+        ##########################################################################
+        pre_head_norm = pre_head_norm_layer or norm_layer 
+        self.norm = pre_head_norm(embed_dim[-1])
+        # Classifier head
+        self.pool = nn.MaxPool2d(2)
+        self.final_up = Final_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
+        self.final_up_before = myFinal_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
+        self.resconv=nn.Conv2d(3,3,1)
+        self.scale=nn.Parameter(torch.ones(1))
+        self.kan=KANBlock(embed_dim[0])
+        self.apply(self._init_weights)
+    def _rgb_to_ycbcr(self, image):
+        r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
+    
+        y = 0.299 * r + 0.587 * g + 0.114 * b
+        u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
+        v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
+        
+        yuv = torch.stack((y, u, v), dim=1)
+        return yuv
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def forward_features(self, x):
+        skip_list = []
+        for i in range(2):
+            x = self.downsample_layers[i](x)
+            #if i==0:
+            ##    x=self.kan(x)
+            #ipdb.set_trace()
+            x = self.stages[i](x)
+            skip_list.append(x)
+        #import ipdb;ipdb.set_trace()
+        return x,skip_list
+
+    def downsample_conv(self,x):
+        x = self.downsample_convlayer(x)
+        x = self.pool(x)
+        return x
+    def uplayer_conv(self,x):
+        x = self.conv_uplayer(x)
+        return x
+
+    def forward_features_up(self, x, skip_list):
+        #import ipdb;ipdb.set_trace()
+        for i in range(2,4):
+            if i == 2:
+                x = self.stages[i](x+self.downsample_conv(skip_list[0]))
+                x = self.up[0](x)
+            elif i == 3:
+                x = self.stages[i](x + skip_list[0]) 
+                x = x+ self.uplayer_conv(skip_list[1])
+        return x
+    
+    def forward_final(self, x,y):
+        # input 3*64*64*96   out=3 256 256 24
+        x=self.final_up_before(x)
+        x =self.final_up(x)+self.scale*y
+        x=self.resconv(x)
         return x
 
     def forward(self, y:torch.Tensor):
@@ -1087,14 +2119,12 @@ class GLNet(nn.Module):
         return x
 
 
-
-
 @register_model
 def glnet_4g(pretrained=False, pretrained_cfg=None, pretrained_cfg_overlay=None, **kwargs):
     model = GLNet(
-        depth=[4, 8, 8, 4],
+        depth=[2, 3, 3, 2],
         embed_dim=[96, 192, 192, 96],
-        mlp_ratios=[4,4,4,4],
+        mlp_ratios=[2,2,2,2],
         head_dim=16,
         norm_layer=nn.BatchNorm2d,
         ######## glnet specific ############
@@ -1111,6 +2141,27 @@ def glnet_4g(pretrained=False, pretrained_cfg=None, pretrained_cfg_overlay=None,
         **kwargs)
     return model
 
+@register_model
+def glnet_light(pretrained=False, pretrained_cfg=None, pretrained_cfg_overlay=None, **kwargs):
+    model = GLNet(
+        depth=[4, 8, 8, 4],
+        embed_dim=[64, 128, 128, 64],
+        mlp_ratios=[3,3,3,3],
+        head_dim=16,
+        norm_layer=nn.BatchNorm2d,
+        ######## glnet specific ############
+        mixing_modes=('glmix', 'glmix.mha_nchw', 'glmix.mha_nchw', 'glmix'),
+        local_dw_ks=5, # kernel size of dw conv
+        slot_init='param', #{'param', 'conv', 'pool', 'ada_maxpool','ada_avgpool'}
+        num_slots=64, # to control number of slots
+        #######################################
+        cpe_ks=3,
+        downsample_style='ovlp', # overlapped patch embedding
+        transition_layout='proj.norm',
+        mlp_dw=True,
+        #######################################
+        **kwargs)
+    return model
 
 class net(nn.Module):
     def __init__(self):
