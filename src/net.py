@@ -8,7 +8,7 @@ class net(nn.Module):
     def __init__(self, filters=32):
         super().__init__()
         self.VUnet=glnet_4g()
-        self.denoise = DenoisingCNN(64)
+        self.denoise = DenoisingCNN(128)
 
     def forward(self, inputs):
         out_unet = self.VUnet(inputs)

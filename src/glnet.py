@@ -642,7 +642,7 @@ class RetinxGLMixBlockV2(nn.Module):
         shortcut = x
         light_y, updt_slots = self._forward_relation(self.norm1(light), light_slots)
         #ipdb.set_trace()
-        x=x+self.Channel_attn(x,light_y.reshape_as(x))
+        x= self.Channel_attn(x,light_y.reshape_as(x))
         x = shortcut + self.drop_path(self.ls1(x))
         x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
 
@@ -961,7 +961,7 @@ class FRFN(nn.Module):
         x =rearrange(x, ' b (h w) (c) -> b c h w ', h = h, w = w)
         return x
 
-
+    
 class myGLMixBlockMHA(nn.Module):
     """
     multihead attention with soft grouping + MLP
@@ -1185,9 +1185,9 @@ class myGLMix(nn.Module):
         """
         x,x1 = self.blocks[0](x)
         x,x2 = self.blocks[1](x)
-        x1=self.local(x1)
-        x2=self.local(x2)
-        return x+self.merger(torch.cat([x,x1,x2],dim=1))
+        xl1=self.local(x1)
+        xl2=self.local(x2)
+        return x+self.merger(torch.cat([x,xl1,xl2],dim=1))
 
 class myGLMixMHA(nn.Module):
     """
@@ -1546,7 +1546,7 @@ class OverlappedPacthEmbeddings(nn.ModuleList):
                 nn.GELU(),
                 nn.Conv2d(embed_dims[0] // 2, embed_dims[0], kernel_size=3, stride=2, padding=1),
                 norm_layer(embed_dims[0]),
-                KANBlock(embed_dims[0])
+                #KANBlock(embed_dims[0]),
             )
         else:
             stem = nn.Sequential(
@@ -1811,181 +1811,6 @@ class GLNetBEST(nn.Module):
     def __init__(self,
         in_chans=3,
         num_classes=3,
-        depth=[4, 8, 8, 4],
-        embed_dim=[96, 192, 192, 96],
-        head_dim=16, qk_scale=None,
-        drop_path_rate=0., drop_rate=0.,
-        use_checkpoint_stages=[],
-        mlp_ratios=[4, 4, 4, 4],
-        norm_layer=nn.BatchNorm2d,
-        pre_head_norm_layer=None,
-        ######## glnet specific ############
-        mixing_modes=('glmix', 'glmix.mha_nchw', 'glmix.mha_nchw', 'glmix'), # {'mha', 'glmix',  'glmix.mha_nchw', 'mha_nchw'}
-        local_dw_ks=5, # kernel size of dw conv
-        slot_init:str='param', #{'param', 'conv', 'pool', 'ada_pool'}
-        num_slots:int=64, # to control number of slots
-        cpe_ks:int=0,
-        #######################################
-        downsample_style:str='non_ovlp', # {'non_ovlp', 'ovlp'}
-        transition_layout:str='proj.norm', # {'norm.proj', 'proj.norm'}
-        dual_patch_norm:bool=False,
-        mlp_dw:bool=False,
-        layerscale:float=-1.,
-        ###################
-        **unused_kwargs
-        ):
-        super().__init__()
-        print(f"unused_kwargs in model initilization: {unused_kwargs}.")
-
-        self.num_classes = num_classes
-        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
-
-        ############ downsample layers (patch embeddings) ######################
-        assert downsample_style in {'non_ovlp', 'ovlp'}
-        if downsample_style=='ovlp':
-            self.downsample_layers = OverlappedPacthEmbeddings(
-                embed_dims=embed_dim, in_chans=in_chans, norm_layer=norm_layer,
-                midd_order=transition_layout,
-                dual_patch_norm=dual_patch_norm)
-        else:
-            self.downsample_layers = NonOverlappedPatchEmbeddings(
-                embed_dims=embed_dim, in_chans=in_chans, norm_layer=norm_layer,
-                midd_order=transition_layout
-            )
-        ##########################################################################
-        self.stages = nn.ModuleList() # 4 feature resolution stages, each consisting of multiple residual blocks
-        self.up = nn.ModuleList()
-        nheads= [dim // head_dim for dim in embed_dim]
-        dp_rates=[x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
-        local_dw_ks = [local_dw_ks,]*4 if isinstance(local_dw_ks, int) else local_dw_ks
-        self.conv_uplayer = ResidualUpSample(embed_dim[1])
-        self.downsample_convlayer = ContinusParalleConv(embed_dim[0],embed_dim[1], pre_Batch_Norm=True)
-        for i in range(2):
-            if i ==0:
-                stage=myGLMix(embed_dim[i],nheads[i],4,slot_init='ada_maxpool')
-            else:
-                stage = BasicLayer(
-                dim=embed_dim[i],
-                depth=depth[i],
-                num_heads=nheads[i], 
-                mlp_ratio=mlp_ratios[i],
-                drop_path=dp_rates[sum(depth[:i]):sum(depth[:i+1])],
-                ####### glnet specific ########
-                mixing_mode=mixing_modes[i],
-                local_dw_ks=local_dw_ks[i],
-                slot_init='ada_maxpool',
-                num_slots=num_slots,
-                cpe_ks=cpe_ks,
-                mlp_dw=mlp_dw,
-                layerscale=layerscale
-                ##################################
-            )
-            if i in use_checkpoint_stages:
-                stage = checkpoint_wrapper(stage)
-            self.stages.append(stage)
-        for i in range(2,3):
-            upsample=PatchExpand2D(embed_dim[i])
-            self.up.append(upsample)
-        for i in range(2,4):
-            if i ==3:
-                stage=myGLMix(embed_dim[i],nheads[i],4,slot_init='ada_avgpool')
-            else:
-                stage = BasicLayer(
-                dim=embed_dim[i],
-                depth=depth[i],
-                num_heads=nheads[i], 
-                mlp_ratio=mlp_ratios[i],
-                drop_path=dp_rates[sum(depth[:i]):sum(depth[:i+1])],
-                ####### glnet specific ########
-                mixing_mode=mixing_modes[i],
-                local_dw_ks=local_dw_ks[i],
-                slot_init='ada_avgpool',
-                num_slots=num_slots,
-                cpe_ks=cpe_ks,
-                mlp_dw=mlp_dw,
-                layerscale=layerscale
-                ##################################
-            )
-            if i in use_checkpoint_stages:
-                stage = checkpoint_wrapper(stage)
-            self.stages.append(stage)
-        ##########################################################################
-        pre_head_norm = pre_head_norm_layer or norm_layer 
-        self.norm = pre_head_norm(embed_dim[-1])
-        # Classifier head
-        self.pool = nn.MaxPool2d(2)
-        self.final_up = Final_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
-        self.final_up_before = myFinal_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
-        self.resconv=nn.Conv2d(3,3,1)
-        self.scale=nn.Parameter(torch.ones(1))
-        self.apply(self._init_weights)
-    def _rgb_to_ycbcr(self, image):
-        r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
-    
-        y = 0.299 * r + 0.587 * g + 0.114 * b
-        u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
-        v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
-        
-        yuv = torch.stack((y, u, v), dim=1)
-        return yuv
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    def forward_features(self, x):
-        skip_list = []
-        for i in range(2):
-            x = self.downsample_layers[i](x)
-            x = self.stages[i](x)
-            skip_list.append(x)
-        #import ipdb;ipdb.set_trace()
-        return x,skip_list
-
-    def downsample_conv(self,x):
-        x = self.downsample_convlayer(x)
-        x = self.pool(x)
-        return x
-    def uplayer_conv(self,x):
-        x = self.conv_uplayer(x)
-        return x
-
-    def forward_features_up(self, x, skip_list):
-        #import ipdb;ipdb.set_trace()
-        for i in range(2,4):
-            if i == 2:
-                x = self.stages[i](x+self.downsample_conv(skip_list[0]))
-                x = self.up[0](x)
-            elif i == 3:
-                x = self.stages[i](x + skip_list[0]) 
-                x = x+ self.uplayer_conv(skip_list[1])
-        return x
-    
-    def forward_final(self, x,y):
-        # input 3*64*64*96   out=3 256 256 24
-        x=self.final_up_before(x)
-        x = self.final_up(x)+self.scale*y
-        x=self.resconv(x)
-        return x
-
-    def forward(self, y:torch.Tensor):
-        ycbcr=self._rgb_to_ycbcr(y)
-        x, skip_list = self.forward_features(ycbcr)
-        x = self.forward_features_up(x, skip_list)
-        x = self.forward_final(x,y)
-        return x
-
-class GLNet(nn.Module):
-    """
-    vision transformer with soft grouping
-    """
-    def __init__(self,
-        in_chans=3,
-        num_classes=3,
         depth=[2, 3, 3, 2],
         embed_dim=[96, 192, 192, 96],
         head_dim=16, qk_scale=None,
@@ -2077,8 +1902,6 @@ class GLNet(nn.Module):
         skip_list = []
         for i in range(2):
             x = self.downsample_layers[i](x)
-            #if i==0:
-            ##    x=self.kan(x)
             #ipdb.set_trace()
             x = self.stages[i](x)
             skip_list.append(x)
@@ -2118,6 +1941,538 @@ class GLNet(nn.Module):
         x = self.forward_final(x,y)
         return x
 
+class M_ResNet(nn.Module):
+    def __init__(self, ):
+        super(M_ResNet, self).__init__()
+        self.M_ResNet_init=nn.Sequential(
+            nn.Conv2d(3,3,kernel_size=5,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(3,3*4,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(3*4, 8, kernel_size=1, padding='same'),
+        )
+
+        self.L1_Split1=nn.Sequential(
+            nn.Conv2d(4,4,kernel_size=5,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(4,4*2,kernel_size=1,padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(4*2, 4, kernel_size=1, padding='same'),
+        )
+        self.L1_Split2 =nn.Sequential(
+            nn.Conv2d(4,4,kernel_size=3,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(4,4*2,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(4*2, 4, kernel_size=1, padding='same'),
+        )
+
+        self.L1_spxConv = nn.Conv2d(8,3, 3, 1, 1)
+
+        self.L2_init=nn.Sequential(
+            nn.Conv2d(3,3,kernel_size=5,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(3,3*4,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(3*4, 8, kernel_size=1, padding='same'),
+        )
+
+        self.L2_Split1=nn.Sequential(
+            nn.Conv2d(4,4,kernel_size=5,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(4,4*2,kernel_size=1,padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(4*2, 4, kernel_size=1, padding='same'),
+        )
+        self.L2_Split2 =nn.Sequential(
+            nn.Conv2d(4,4,kernel_size=3,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(4,4*2,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(4*2, 4, kernel_size=1, padding='same'),
+        )
+        self.L2_spxConv = nn.Conv2d(8, 3, 3, 1, 1)
+
+        self.M_ResNet_Tail=nn.Sequential(
+            nn.Conv2d(9,3,kernel_size=7,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(3,3*4,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(3*4, 3, kernel_size=1, padding='same'),
+            nn.Tanh()
+        )
+
+    def forward(self, x):
+        Res=x
+        x=self.M_ResNet_init(x)
+        spx = torch.split(x, 4, 1)
+
+        s1=self.L1_Split1(spx[0])
+        s2 = self.L1_Split2(spx[1])
+
+        x=torch.cat((s1,s2),1)
+        x=self.L1_spxConv(x)
+        #
+        Res_L1=x
+
+        x=self.L2_init(x)
+        spx = torch.split(x, 4, 1)
+
+        s1 = self.L2_Split1(spx[0])
+        s2 = self.L2_Split2(spx[1])
+
+        x = torch.cat((s1, s2), 1)
+        x = self.L2_spxConv(x)
+
+        x = torch.cat((Res_L1, x), 1)
+
+
+        x=torch.cat((Res,x),1)
+        x=self.M_ResNet_Tail(x)
+
+        return x
+
+class resnet(nn.Module):
+    def __init__(self,dim):
+        super().__init__()
+        self.resnet_init=nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim, dim*2, kernel_size=1, padding='same'),
+        )
+
+        self.L1_Split1=nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=5,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(dim, dim, kernel_size=1, padding='same'),
+        )
+        self.L1_Split2 =nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=3,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim, dim, kernel_size=1, padding='same'),
+        )
+
+        self.L1_spxConv = nn.Conv2d(dim*2,dim,1)
+
+        self.L2_init=nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim, dim*2, kernel_size=1, padding='same'),
+        )
+
+        self.L2_Split1=nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=5,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(dim, dim, kernel_size=1, padding='same'),
+        )
+        self.L2_Split2 =nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=3,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim, dim, kernel_size=1, padding='same'),
+        )
+        self.L2_spxConv = nn.Conv2d(dim*2, dim, 1)
+
+        self.resnet_Tail=nn.Sequential(
+            nn.Conv2d(dim*3,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim, dim, kernel_size=1, padding='same'),
+            nn.Tanh()
+        )
+        self.dim=dim
+    def forward(self, x):
+        Res=x
+        x=self.resnet_init(x)
+        spx = torch.split(x, self.dim, 1)
+
+        s1=self.L1_Split1(spx[0])
+        s2 = self.L1_Split2(spx[1])
+
+        x=torch.cat((s1,s2),1)
+        x=self.L1_spxConv(x)
+        #
+        Res_L1=x
+
+        x=self.L2_init(x)
+        spx = torch.split(x, self.dim, 1)
+
+        s1 = self.L2_Split1(spx[0])
+        s2 = self.L2_Split2(spx[1])
+
+        x = torch.cat((s1, s2), 1)
+        x = self.L2_spxConv(x)
+
+        x = torch.cat((Res_L1, x), 1)
+
+
+        x=torch.cat((Res,x),1)
+        x=self.resnet_Tail(x)
+
+        return x
+class resnetv1(nn.Module):
+    def __init__(self,dim):
+        super().__init__()
+        self.resnet_init=nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim, dim*2, kernel_size=1, padding='same'),
+        )
+
+        self.L1_Split1=nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=5,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(dim, dim, kernel_size=1, padding='same'),
+        )
+        self.L1_Split2 =nn.Sequential(
+            nn.Conv2d(dim,dim,kernel_size=3,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim, dim, kernel_size=1, padding='same'),
+        )
+
+        self.L1_spxConv = nn.Conv2d(dim*2,dim,1)
+
+        self.resnet_Tail=nn.Sequential(
+            nn.Conv2d(dim*2,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim,dim,kernel_size=1,padding='same'),
+            nn.CELU(),
+            nn.Conv2d(dim, dim, kernel_size=1, padding='same'),
+            nn.Tanh()
+        )
+        self.dim=dim
+    def forward(self, x):
+        Res=x
+        x=self.resnet_init(x)
+        spx = torch.split(x, self.dim, 1)
+
+        s1=self.L1_Split1(spx[0])
+        s2 = self.L1_Split2(spx[1])
+
+        x=torch.cat((s1,s2),1)
+        x=self.L1_spxConv(x)
+
+        x=torch.cat((Res,x),1)
+        x=self.resnet_Tail(x)
+
+        return x
+class GLNet(nn.Module):
+    """
+    vision transformer with soft grouping
+    """
+    def __init__(self,
+        in_chans=3,
+        num_classes=3,
+        depth=[2, 3, 3, 2],
+        embed_dim=[96, 192, 192, 96],
+        head_dim=16, qk_scale=None,
+        drop_path_rate=0., drop_rate=0.,
+        use_checkpoint_stages=[],
+        mlp_ratios=[4, 4, 4, 4],
+        norm_layer=nn.BatchNorm2d,
+        pre_head_norm_layer=None,
+        ######## glnet specific ############
+        mixing_modes=('glmix', 'glmix.mha_nchw', 'glmix.mha_nchw', 'glmix'), # {'mha', 'glmix',  'glmix.mha_nchw', 'mha_nchw'}
+        local_dw_ks=5, # kernel size of dw conv
+        slot_init:str='param', #{'param', 'conv', 'pool', 'ada_pool'}
+        num_slots:int=64, # to control number of slots
+        cpe_ks:int=0,
+        #######################################
+        downsample_style:str='non_ovlp', # {'non_ovlp', 'ovlp'}
+        transition_layout:str='proj.norm', # {'norm.proj', 'proj.norm'}
+        dual_patch_norm:bool=False,
+        mlp_dw:bool=False,
+        layerscale:float=-1.,
+        ###################
+        **unused_kwargs
+        ):
+        super().__init__()
+        print(f"unused_kwargs in model initilization: {unused_kwargs}.")
+
+        self.num_classes = num_classes
+        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+
+        ############ downsample layers (patch embeddings) ######################
+        assert downsample_style in {'non_ovlp', 'ovlp'}
+        self.downsample_layers = OverlappedPacthEmbeddings(
+                embed_dims=embed_dim, in_chans=in_chans, norm_layer=norm_layer,
+                midd_order=transition_layout,
+                dual_patch_norm=dual_patch_norm)
+        ##########################################################################
+        self.stages = nn.ModuleList() # 4 feature resolution stages, each consisting of multiple residual blocks
+        self.up = nn.ModuleList()
+        nheads= [dim // head_dim for dim in embed_dim]
+        dp_rates=[x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
+        local_dw_ks = [local_dw_ks,]*4 if isinstance(local_dw_ks, int) else local_dw_ks
+        self.conv_uplayer = ResidualUpSample(embed_dim[1])
+        self.downsample_convlayer = ContinusParalleConv(embed_dim[0],embed_dim[1])
+        for i in range(2):
+            if i ==0:
+                stage=myGLMix(embed_dim[i],nheads[i],2,slot_init='ada_maxpool')
+            else:
+                stage=myGLMixMHA(embed_dim[i],nheads[i],1,slot_init='ada_maxpool')
+            self.stages.append(stage)
+        for i in range(2,3):
+            upsample=PatchExpand2D(embed_dim[i])
+            self.up.append(upsample)
+        for i in range(2,4):
+            if i ==3:
+                stage=myGLMix(embed_dim[i],nheads[i],2,slot_init='ada_avgpool')
+            else:
+                stage = myGLMixMHA(embed_dim[i],nheads[i],1,slot_init='ada_avgpool')
+            self.stages.append(stage)
+        ##########################################################################
+        pre_head_norm = pre_head_norm_layer or norm_layer 
+        self.norm = pre_head_norm(embed_dim[-1])
+        # Classifier head
+        self.pool = nn.MaxPool2d(2)
+        self.final_up = Final_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
+        self.final_up_before = myFinal_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
+        self.resconv=nn.Conv2d(3,3,1)
+        self.scale=nn.Parameter(torch.ones(1))
+        self.apply(self._init_weights)
+    def _rgb_to_ycbcr(self, image):
+        r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
+    
+        y = 0.299 * r + 0.587 * g + 0.114 * b
+        u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
+        v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
+        
+        yuv = torch.stack((y, u, v), dim=1)
+        return yuv
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def forward_features(self, x):
+        skip_list = []
+        for i in range(2):
+            x = self.downsample_layers[i](x)
+            #ipdb.set_trace()
+            x = self.stages[i](x)
+            skip_list.append(x)
+        #import ipdb;ipdb.set_trace()
+        return x,skip_list
+
+    def downsample_conv(self,x):
+        x = self.downsample_convlayer(x)
+        x = self.pool(x)
+        return x
+    def uplayer_conv(self,x):
+        x = self.conv_uplayer(x)
+        return x
+
+    def forward_features_up(self, x, skip_list):
+        #import ipdb;ipdb.set_trace()
+        for i in range(2,4):
+            if i == 2:
+                x = self.stages[i](x+self.downsample_conv(skip_list[0]))
+                x = self.up[0](x)
+            elif i == 3:
+                x = self.stages[i](x + skip_list[0]) 
+                x = x+ self.uplayer_conv(skip_list[1])
+        return x
+    
+    def forward_final(self, x,y):
+        # input 3*64*64*96   out=3 256 256 24
+        x=self.final_up_before(x)
+        x =self.final_up(x)+self.scale*y
+        x=self.resconv(x)
+        return x
+
+    def forward(self, y:torch.Tensor):
+        ycbcr=self._rgb_to_ycbcr(y)
+        x, skip_list = self.forward_features(ycbcr)
+        x = self.forward_features_up(x, skip_list)
+        x = self.forward_final(x,y)
+        return x
+
+class CA_Block(nn.Module):
+    def __init__(self, channel,Deep=2):
+        super(CA_Block, self).__init__()
+
+        self.init=nn.Sequential(
+            nn.Conv2d(3, channel, kernel_size=3, padding='same'),
+            nn.Tanh())
+
+        modules_RC1=[]
+        for i in range(Deep):
+            modules_RC1.append(SEBlock(input_channels=channel))
+        self.RC1_body=nn.Sequential(*modules_RC1)
+
+        self.convres=nn.Conv2d(channel,channel,1,1,0)
+        self.tail=nn.Conv2d(channel,3,3,1,1)
+
+    def forward(self,x):
+        x=self.init(x)
+        res=x
+        x=x*self.RC1_body(x)
+        res=self.convres(res)
+        x=x+res
+        x=self.tail(x)
+        return x
+
+class GLNetbig(nn.Module):
+    """
+    vision transformer with soft grouping
+    """
+    def __init__(self,
+        in_chans=3,
+        num_classes=3,
+        depth=[2, 3, 3, 2],
+        embed_dim=[96, 192, 192, 96],
+        head_dim=16, qk_scale=None,
+        drop_path_rate=0., drop_rate=0.,
+        use_checkpoint_stages=[],
+        mlp_ratios=[4, 4, 4, 4],
+        norm_layer=nn.BatchNorm2d,
+        pre_head_norm_layer=None,
+        ######## glnet specific ############
+        mixing_modes=('glmix', 'glmix.mha_nchw', 'glmix.mha_nchw', 'glmix'), # {'mha', 'glmix',  'glmix.mha_nchw', 'mha_nchw'}
+        local_dw_ks=5, # kernel size of dw conv
+        slot_init:str='param', #{'param', 'conv', 'pool', 'ada_pool'}
+        num_slots:int=64, # to control number of slots
+        cpe_ks:int=0,
+        #######################################
+        downsample_style:str='non_ovlp', # {'non_ovlp', 'ovlp'}
+        transition_layout:str='proj.norm', # {'norm.proj', 'proj.norm'}
+        dual_patch_norm:bool=False,
+        mlp_dw:bool=False,
+        layerscale:float=-1.,
+        ###################
+        **unused_kwargs
+        ):
+        super().__init__()
+        print(f"unused_kwargs in model initilization: {unused_kwargs}.")
+
+        self.num_classes = num_classes
+        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+
+        ############ downsample layers (patch embeddings) ######################
+        assert downsample_style in {'non_ovlp', 'ovlp'}
+        self.downsample_layers = OverlappedPacthEmbeddings(
+                embed_dims=embed_dim, in_chans=in_chans, norm_layer=norm_layer,
+                midd_order=transition_layout,
+                dual_patch_norm=dual_patch_norm)
+        ##########################################################################
+        self.stages = nn.ModuleList() # 4 feature resolution stages, each consisting of multiple residual blocks
+        self.up = nn.ModuleList()
+        nheads= [dim // head_dim for dim in embed_dim]
+        dp_rates=[x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
+        local_dw_ks = [local_dw_ks,]*4 if isinstance(local_dw_ks, int) else local_dw_ks
+        self.conv_uplayer = ResidualUpSample(embed_dim[1])
+        self.downsample_convlayer = ContinusParalleConv(embed_dim[0],embed_dim[1])
+        for i in range(2):
+            if i ==0:
+                stage=myGLMix(embed_dim[i],nheads[i],2,slot_init='ada_maxpool')
+            else:
+                stage=myGLMixMHA(embed_dim[i],nheads[i],1,slot_init='ada_maxpool')
+            self.stages.append(stage)
+        for i in range(2,3):
+            upsample=PatchExpand2D(embed_dim[i])
+            self.up.append(upsample)
+        for i in range(2,4):
+            if i ==3:
+                stage=myGLMix(embed_dim[i],nheads[i],2,slot_init='ada_avgpool')
+            else:
+                stage = myGLMixMHA(embed_dim[i],nheads[i],1,slot_init='ada_avgpool')
+            self.stages.append(stage)
+        ##########################################################################
+        pre_head_norm = pre_head_norm_layer or norm_layer 
+        self.norm = pre_head_norm(embed_dim[-1])
+        # Classifier head
+        self.pool = nn.MaxPool2d(2)
+        self.final_up = Final_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
+        self.final_up_before = myFinal_pixel_shuffle2Dycbcr(dim=embed_dim[-1], norm_layer=norm_layer)
+        self.resconv=nn.Conv2d(3,3,1)
+        self.scale=nn.Parameter(torch.ones(1))
+        self.patchbefore_conv0=CA_Block(embed_dim[0])
+        self.apply(self._init_weights)
+    def _rgb_to_ycbcr(self, image):
+        r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
+    
+        y = 0.299 * r + 0.587 * g + 0.114 * b
+        u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
+        v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
+        
+        yuv = torch.stack((y, u, v), dim=1)
+        return yuv
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def forward_features(self, x,residual):
+        skip_list = []
+        for i in range(2):
+            x = self.downsample_layers[i](x+residual)
+            #ipdb.set_trace()
+            x = self.stages[i](x)
+            skip_list.append(x)
+        #import ipdb;ipdb.set_trace()
+        return x,skip_list
+
+    def downsample_conv(self,x):
+        x = self.downsample_convlayer(x)
+        x = self.pool(x)
+        return x
+    def uplayer_conv(self,x):
+        x = self.conv_uplayer(x)
+        return x
+
+    def forward_features_up(self, x, skip_list):
+        #import ipdb;ipdb.set_trace()
+        for i in range(2,4):
+            if i == 2:
+                x = self.stages[i](x+self.downsample_conv(skip_list[0]))
+                x = self.up[0](x)
+            elif i == 3:
+                x = self.stages[i](x + skip_list[0]) 
+                x = x+ self.uplayer_conv(skip_list[1])
+        return x
+    
+    def forward_final(self, x,y):
+        # input 3*64*64*96   out=3 256 256 24
+        x=self.final_up_before(x)
+        x =self.final_up(x)+self.scale*y
+        x=self.resconv(x)
+        return x
+    def foward_conv(self,x):
+        self.patchbefore_conv0
+    def forward(self, y:torch.Tensor):
+        ycbcr=self._rgb_to_ycbcr(y)
+
+        x, skip_list = self.forward_features(ycbcr)
+        x = self.forward_features_up(x, skip_list)
+        x = self.forward_final(x,y)
+        return x
 
 @register_model
 def glnet_4g(pretrained=False, pretrained_cfg=None, pretrained_cfg_overlay=None, **kwargs):

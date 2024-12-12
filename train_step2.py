@@ -79,7 +79,7 @@ def cfg():
     parser.add_argument('--seed', type=int, default=123, help='random seed to use. Default=123')
     parser.add_argument('--gpus', default=1, type=int, help='number of gpu')
     parser.add_argument('--patch_size', type=int, default=256, help='Size of cropped LR image')
-    parser.add_argument('--weights_path', type=str, default="/home/huangweiyan/workspace/model/cv/models/newftanh/best.pth", help='initial BEE weight')
+    parser.add_argument('--weights_path', type=str, default="/home/huangweiyan/workspace/model/cv/models/lolv1wkanb/best.pth", help='initial BEE weight')
     opt = parser.parse_args()
     return opt
 
@@ -353,7 +353,7 @@ def main(opt):
                 ssim_loss = 1 - ssim(pred_t, NL_t)
                 tv_loss = TV_loss(pred_t)
                 p_loss = percep_loss(pred_t, NL_t)
-                smoothloss = smooth_criterion(pred_t, NL_t)
+                smoothloss = L1_criterion(pred_t, NL_t)
                 loss = 2 * ssim_loss + 1.2 * p_loss + 0.8 * smoothloss + 1 * inner_loss + 0.01 * tv_loss + 1 * his_loss + 1 * histogram_loss_B  # 2024 1 24 1404 PSNR 20.09 0.8348
                 # loss = 2 * ssim_loss + 2 * p_loss + 0.8 * smoothloss + 1 * inner_loss + 0.01 * tv_loss + 1 * his_loss + 1 * histogram_loss_B
                 writer.add_scalar('ssim_loss', ssim_loss, over_Iter)

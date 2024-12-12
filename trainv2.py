@@ -64,15 +64,15 @@ def histogram_loss(tensor1, tensor2):
 
 def cfg():
     parser = argparse.ArgumentParser(description='low-light image enhancement by SMNet')
-    parser.add_argument('--trainset', type=str, default='/home/huangweiyan/workspace/model/cv/data/LOLv1/Train', help='location of trainset')
-    parser.add_argument('--testset', type=str, default='/home/huangweiyan/workspace/model/cv/data/LOLv1/Test', help='location of testset')
+    parser.add_argument('--trainset', type=str, default='/home/huangweiyan/workspace/model/cv/data/LOLv2/Real_captured/Train', help='location of trainset')
+    parser.add_argument('--testset', type=str, default='/home/huangweiyan/workspace/model/cv/data/LOLv2/Real_captured/Test', help='location of testset')
     parser.add_argument('--output', default='output', help='location to save output images')
-    parser.add_argument('--modelname', default='lolv1wkanball', help='define model name')
+    parser.add_argument('--modelname', default='lolv2R', help='define model name')
     parser.add_argument('--deviceid', default="0", help='selecte which gpu device')
     parser.add_argument('--lr', type=float, default=5e-4, help='Learning Rate')
     parser.add_argument('--lr_min', type=float, default=5e-5, help='Minimum Learning Rate')
     parser.add_argument('--batchSize', type=int, default=8, help='training batch size')
-    parser.add_argument('--nEpochs', type=int, default=600, help='number of epochs to train for')
+    parser.add_argument('--nEpochs', type=int, default=500, help='number of epochs to train for')
     parser.add_argument('--snapshots', type=int, default=1, help='Snapshots')
     parser.add_argument('--start_iter', type=int, default=0, help='Starting Epoch')
     parser.add_argument('--gpu_mode', type=bool, default=True)
@@ -344,7 +344,7 @@ def main(opt):
                 p_loss = percep_loss(pred_t, NL_t)
                 smoothloss = L1_criterion(pred_t, NL_t)
                 edgeloss=edge(pred_t, NL_t)
-                loss = 2 * ssim_loss + 1.2 * p_loss + 0.8 * smoothloss+ 0.01 * tv_loss + 1 * his_loss + 1 * histogram_loss_B+edgeloss  # 2024 1 24 1404 PSNR 20.09 0.8348
+                loss = 2 * ssim_loss + 1.2 * p_loss + 0.8 * smoothloss+ 0.01 * tv_loss + 1 * his_loss + 1 * histogram_loss_B+edgeloss  
                 writer.add_scalar('ssim_loss', ssim_loss, over_Iter)
                 writer.add_scalar('tv_loss', tv_loss * 0.01, over_Iter)
                 writer.add_scalar('perceptual_loss', p_loss, over_Iter)
